@@ -34,6 +34,20 @@ jobs:
       - name: Configure and install dependencies
         run: xmake f -m release --yes
 
+      # 调试：查看 LeviLamina 包含路径结构
+      - name: Debug LeviLamina include structure
+        run: |
+          $leviPath = Resolve-Path "$env:USERPROFILE\AppData\Local\.xmake\packages\l\levilamina\*\include" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($leviPath) {
+            Write-Host "LeviLamina include path: $leviPath"
+            Write-Host "Listing ll/api directory:"
+            Get-ChildItem -Path "$leviPath\ll\api" -Recurse -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "LeviLamina include path not found!"
+            exit 1
+          }
+        shell: pwsh
+
       - name: Show xmake configuration
         run: xmake show -v
 
