@@ -44,6 +44,5 @@ target("RandomTickOptimizer")
     add_syslinks("shlwapi", "advapi32")
     set_targetdir("bin")
     set_runtimes("MD")
-    set_pcxxflags("-fPIC")
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
