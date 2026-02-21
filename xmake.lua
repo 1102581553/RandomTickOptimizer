@@ -8,7 +8,8 @@ option("target_type")
     set_values("server", "client")
 option_end()
 
-add_requires("levilamina", {configs = {target_type = get_config("target_type")}})
+-- 固定 LeviLamina 版本，避免每次拉取最新版导致缓存失效
+add_requires("levilamina 1.9.5", {configs = {target_type = get_config("target_type")}})
 add_requires("levibuildscript")
 
 if not has_config("vs_runtime") then
