@@ -75,7 +75,7 @@ struct OptParams {
 };
 
 void registerCommands() {
-    auto& cmd = ll::command::CommandRegistrar::getInstance().getOrCreateCommand(
+    auto& cmd = ll::command::CommandRegistrar::getInstance(false).getOrCreateCommand(
         "opt",
         "Toggle optimization options and view stats",
         CommandPermissionLevel::GameDirectors
