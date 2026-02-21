@@ -1,21 +1,16 @@
--- 优化后的 xmake.lua 文件，已解决 --target_type 无效选项问题
+-- 修复后的 xmake.lua 文件，已完全移除 target_type 选项
 
--- 设置项目名称
 set_project("RandomTickOptimizer")
-
--- 设置项目版本
 set_version("1.0.0")
 
--- 固定 LeviLamina 版本，避免每次拉取最新版导致缓存失效
+-- 固定 LeviLamina 的 target_type 为 "server"（直接写死，不再需要命令行参数）
 add_requires("levilamina 1.9.5", {configs = {target_type = "server"}})
 add_requires("levibuildscript")
 
--- 设置运行时库
 if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
 
--- 通用编译选项
 add_cxflags(
     "-O2", 
     "-march=native", 
@@ -36,10 +31,8 @@ set_optimize("fast")
 set_symbols("none")
 set_exceptions("none")
 
--- 添加头文件目录
 add_includedirs("src")
 
--- 配置目标
 target("RandomTickOptimizer")
     add_rules("@levibuildscript/linkrule")
     add_rules("@levibuildscript/modpacker")
@@ -52,7 +45,6 @@ target("RandomTickOptimizer")
     set_targetdir("bin")
     set_runtimes("MD")
     set_pcxxflags("-fPIC")
-    add_cxflags("-j4")
+    add_cxflags("-j4")  -- 4线程并行编译
 
--- 添加仓库
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
