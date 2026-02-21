@@ -1,7 +1,7 @@
 #pragma once
 #include <ll/api/Config.h>
 #include <ll/api/io/Logger.h>
-#include <ll/api/event/ListenerBase.h>
+#include <ll/api/mod/NativeMod.h>
 #include <memory>
 #include <atomic>
 
