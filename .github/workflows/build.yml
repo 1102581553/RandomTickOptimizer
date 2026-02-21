@@ -13,7 +13,6 @@ jobs:
       matrix:
         target_type:
           - server
-          - client
     steps:
       - uses: actions/checkout@v6
 
@@ -29,17 +28,13 @@ jobs:
           restore-keys: |
             xmake-
 
-      - name: Update repositories
-        run: xmake repo -u
+      - run: xmake repo -u
 
-      - name: Configure
-        run: xmake f -a x64 -m release -p windows -v --target_type=${{ matrix.target_type }} -y
+      - run: xmake f -a x64 -m release -p windows -v --target_type=${{ matrix.target_type }} -y
 
-      - name: Build
-        run: xmake -v -y
+      - run: xmake -v -y
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ github.event.repository.name }}-${{ github.sha }}-${{ matrix.target_type }}-windows-x64
           path: |
