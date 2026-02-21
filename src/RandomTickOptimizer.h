@@ -1,7 +1,7 @@
 #pragma once
 #include <ll/api/Config.h>
 #include <ll/api/io/Logger.h>
-#include <ll/api/mod/NativeMod.h>
+#include <ll/api/event/ListenerBase.h>
 #include <memory>
 #include <atomic>
 
@@ -21,17 +21,20 @@ void resetBlockedCount();
 
 ll::io::Logger& logger();
 
-class PluginImpl : public ll::mod::NativeMod {
+class PluginImpl {
 public:
-    explicit PluginImpl(ll::mod::Manifest manifest);
+    static PluginImpl& getInstance();
 
-    bool onLoad() override;
-    bool onEnable() override;
-    bool onDisable() override;
+    PluginImpl() : mSelf(*ll::mod::NativeMod::current()) {}
+
+    [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
+
+    bool load();
+    bool enable();
+    bool disable();
 
 private:
-    void registerCommands();
-    void initHooks();
+    ll::mod::NativeMod& mSelf;
 };
 
 } // namespace random_tick_optimizer
