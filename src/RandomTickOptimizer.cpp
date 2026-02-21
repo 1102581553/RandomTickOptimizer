@@ -8,13 +8,14 @@
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
 #include "mc/world/level/block/Block.h"
+#include "ll/api/io/LoggerRegistry.h"
 #include <filesystem>
 #include <unordered_set>
 
 namespace random_tick_optimizer {
 
 static Config config;
-static std::unique_ptr<ll::io::Logger> log;
+static std::shared_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
 
 // 使用方块名称判断，避免 ID 变化
@@ -44,7 +45,7 @@ bool saveConfig() {
 
 ll::io::Logger& logger() {
     if (!log) {
-        log = std::make_unique<ll::io::Logger>("RandomTickOptimizer");
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("RandomTickOptimizer");
     }
     return *log;
 }
@@ -57,6 +58,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Block::shouldRandomTick,
     bool
 ) {
+    (void)origin;
     if (!getConfig().randomTick) {
         return origin();
     }
