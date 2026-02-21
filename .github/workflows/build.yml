@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:  # 允许手动触发
-  
+
 jobs:
   build:
     runs-on: windows-latest
@@ -20,13 +20,11 @@ jobs:
         with:
           xmake-version: latest
 
-      - name: Clean and reinstall dependencies
-        run: |
-          xmake clean -a
-          xmake require --force
+      - name: Clean
+        run: xmake clean -a
 
-      - name: Configure xmake
-        run: xmake f -m release
+      - name: Configure and install dependencies
+        run: xmake f -m release --yes
 
       - name: Build
         run: xmake -v
@@ -34,7 +32,7 @@ jobs:
       - name: List build outputs
         run: |
           echo "Listing build directory contents:"
-          dir build /s
+          Get-ChildItem -Path build -Recurse
           echo "Looking for DLL file:"
           Get-ChildItem -Path build -Recurse -Filter *.dll
 
