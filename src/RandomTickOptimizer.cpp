@@ -47,12 +47,11 @@ ll::io::Logger& logger() {
     return *log;
 }
 
-// 使用字符串符号钩子，避免编译时符号查找问题
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ShouldRandomTickHook,
     ll::memory::HookPriority::Normal,
     Block,
-    "?shouldRandomTick@Block@@QEBA_NXZ",
+    &Block::shouldRandomTick,
     bool
 ) {
     if (!getConfig().randomTick) {
@@ -114,7 +113,7 @@ void PluginImpl::registerCommands() {
         });
 }
 
-PluginImpl::PluginImpl(ll::plugin::Manifest manifest) : Plugin(std::move(manifest)) {}
+PluginImpl::PluginImpl(ll::mod::Manifest manifest) : NativeMod(std::move(manifest)) {}
 
 bool PluginImpl::onLoad() {
     std::filesystem::create_directories(getConfigDir());
@@ -139,4 +138,4 @@ bool PluginImpl::onDisable() {
 
 } // namespace random_tick_optimizer
 
-LL_REGISTER_PLUGIN(random_tick_optimizer::PluginImpl, random_tick_optimizer::logger());
+LL_REGISTER_MOD(random_tick_optimizer::PluginImpl, random_tick_optimizer::logger());
