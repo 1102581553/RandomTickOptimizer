@@ -1,71 +1,46 @@
 name: Build
 
 on:
+  pull_request:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30  # 防止无限等待
-
+    strategy:
+      matrix:
+        target_type:
+          - server
+          - client
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Setup xmake
-        uses: xmake-io/github-action-setup-xmake@v1
+      - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
 
-      # 缓存 xmake 依赖包，加速后续构建
-      - name: Cache xmake packages
-        uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
-          path: ~/.xmake/packages
-          key: ${{ runner.os }}-xmake-${{ hashFiles('xmake.lua') }}
-
-      - name: Clean
-        run: xmake clean -a
-
-      - name: Configure and install dependencies
-        run: xmake f -m release --yes
-
-      # 调试：查看 LeviLamina 包含路径结构
-      - name: Debug LeviLamina include structure
-        run: |
-          $leviPath = Resolve-Path "$env:USERPROFILE\AppData\Local\.xmake\packages\l\levilamina\*\include" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($leviPath) {
-            Write-Host "LeviLamina include path: $leviPath"
-            Write-Host "Listing ll/api directory:"
-            Get-ChildItem -Path "$leviPath\ll\api" -Recurse -ErrorAction SilentlyContinue
-          } else {
-            Write-Host "LeviLamina include path not found!"
-            exit 1
-          }
-        shell: pwsh
-
-      - name: Show xmake configuration
-        run: xmake show -v
-
-      - name: Build (verbose)
-        run: xmake --verbose
-
-      - name: List build outputs
-        run: |
-          echo "Listing build directory contents:"
-          Get-ChildItem -Path build -Recurse
-          echo "Looking for DLL file:"
-          Get-ChildItem -Path build -Recurse -Filter *.dll
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: RandomTickOptimizer-windows-x64
           path: |
-            build/Release/RandomTickOptimizer.dll
-            build/**/*.dll
-          if-no-files-found: error
+            ~/AppData/Local/.xmake
+          key: xmake-${{ hashFiles('xmake.lua') }}
+          restore-keys: |
+            xmake-
+
+      - name: Update repositories
+        run: xmake repo -u
+
+      - name: Configure
+        run: xmake f -a x64 -m release -p windows -v --target_type=${{ matrix.target_type }} -y
+
+      - name: Build
+        run: xmake -v -y
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ github.event.repository.name }}-${{ github.sha }}-${{ matrix.target_type }}-windows-x64
+          path: |
+            bin/
