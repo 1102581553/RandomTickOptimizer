@@ -1,27 +1,69 @@
-add_rules("mode.debug", "mode.release")
+name: Build
 
-add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:  # 允许手动触发
 
-option("target_type")
-    set_default("server")
-    set_showmenu(true)
-    set_values("server", "client")
-option_end()
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30  # 防止无限等待
 
-add_requires("levilamina", {configs = {target_type = get_config("target_type")}})
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-if not has_config("vs_runtime") then
-    set_runtimes("MD")
-end
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
 
-target("RandomTickOptimizer")
-    add_cxflags("/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
-    add_defines("NOMINMAX", "UNICODE")
-    add_packages("levilamina")
-    set_exceptions("none")
-    set_kind("shared")
-    set_languages("c++20")
-    set_symbols("debug")
-    add_headerfiles("src/*.h")
-    add_files("src/*.cpp")
-    add_includedirs("src")
+      # 缓存 xmake 依赖包，加速后续构建
+      - name: Cache xmake packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.xmake/packages
+          key: ${{ runner.os }}-xmake-${{ hashFiles('xmake.lua') }}
+
+      - name: Clean
+        run: xmake clean -a
+
+      - name: Configure and install dependencies
+        run: xmake f -m release --yes
+
+      # 验证 LeviLamina 头文件是否存在
+      - name: Verify LeviLamina include path
+        run: |
+          $path = Resolve-Path "$env:USERPROFILE\AppData\Local\.xmake\packages\l\levilamina\*\include\ll\api\plugin\Plugin.h" -ErrorAction SilentlyContinue
+          if ($path) {
+            echo "Plugin.h found at: $path"
+          } else {
+            echo "Plugin.h NOT found!"
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Show xmake configuration
+        run: xmake show -v
+
+      - name: Build (verbose)
+        run: xmake --verbose
+
+      - name: List build outputs
+        run: |
+          echo "Listing build directory contents:"
+          Get-ChildItem -Path build -Recurse
+          echo "Looking for DLL file:"
+          Get-ChildItem -Path build -Recurse -Filter *.dll
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RandomTickOptimizer-windows-x64
+          path: |
+            build/Release/RandomTickOptimizer.dll
+            build/**/*.dll
+          if-no-files-found: error
