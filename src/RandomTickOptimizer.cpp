@@ -7,6 +7,7 @@
 #include "mc/world/level/block/Block.h"
 #include <filesystem>
 #include <unordered_set>
+#include <chrono>
 
 namespace random_tick_optimizer {
 
@@ -68,7 +69,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 void startDebugTask() {
     ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
         while (true) {
-            co_await 1s; // 等待1秒
+            co_await std::chrono::seconds(1); // ✅ 修复：使用 std::chrono::seconds(1) 替代 1s
             if (getConfig().debug) {
                 logger().info("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
             }
@@ -94,7 +95,6 @@ bool PluginImpl::load() {
 }
 
 bool PluginImpl::enable() {
-    // 如果debug开启，启动调试任务
     if (config.debug) {
         startDebugTask();
     }
@@ -104,8 +104,6 @@ bool PluginImpl::enable() {
 
 bool PluginImpl::disable() {
     ShouldRandomTickHook::unhook();
-    // 协程任务会在插件禁用时自动销毁吗？可能不会，但我们可以不手动处理，因为任务会随着executor关闭而停止。
-    // 更好的是保留任务句柄，但简单起见，我们不做复杂处理。
     logger().info("Plugin disabled");
     return true;
 }
