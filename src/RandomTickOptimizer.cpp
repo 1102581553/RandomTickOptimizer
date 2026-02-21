@@ -8,11 +8,13 @@
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
+#include "mc/server/commands/CommandRegistry.h"          // 新增：确保 CommandRegistry::parse 声明
+#include "mc/deps/core/utility/typeid_t.h"               // 新增：为 typeid_t 提供支持
 #include "mc/world/level/block/Block.h"
 #include <filesystem>
 #include <unordered_set>
-#include <optional>   // 显式包含 std::optional
-#include <string>     // 显式包含 std::string
+#include <optional>
+#include <string>
 
 namespace random_tick_optimizer {
 
