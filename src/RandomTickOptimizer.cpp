@@ -1,28 +1,19 @@
 #include "RandomTickOptimizer.h"
-#include "ll/api/command/CommandHandle.h"
-#include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/memory/Hook.h"
 #include "ll/api/mod/RegisterHelper.h"
-#include "ll/api/service/Bedrock.h"
-#include "ll/api/io/LoggerRegistry.h"
-#include "mc/server/commands/CommandOrigin.h"
-#include "mc/server/commands/CommandOutput.h"
-#include "mc/server/commands/CommandPermissionLevel.h"
-#include "mc/server/commands/CommandRegistry.h"          // 新增：确保 CommandRegistry::parse 声明
-#include "mc/deps/core/utility/typeid_t.h"               // 新增：为 typeid_t 提供支持
+#include "ll/api/coro/CoroTask.h"
+#include "ll/api/thread/ServerThreadExecutor.h"
+#include "ll/api/chrono/GameChrono.h"
 #include "mc/world/level/block/Block.h"
 #include <filesystem>
 #include <unordered_set>
-#include <optional>
-#include <string>
 
 namespace random_tick_optimizer {
 
 static Config config;
-static std::shared_ptr<ll::io::Logger> log;
+static std::unique_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
 
-// 使用方块名称判断，避免 ID 变化
 static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
     "minecraft:deepslate",
     "minecraft:air",
@@ -49,7 +40,7 @@ bool saveConfig() {
 
 ll::io::Logger& logger() {
     if (!log) {
-        log = ll::io::LoggerRegistry::getInstance().getOrCreate("RandomTickOptimizer");
+        log = std::make_unique<ll::io::Logger>("RandomTickOptimizer");
     }
     return *log;
 }
@@ -63,59 +54,26 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     bool
 ) {
     if (!getConfig().randomTick) {
-        return this->origin();  // 正确调用原函数
+        return origin();
     }
-    // 使用方块类型名判断
     std::string blockName = this->getTypeName();
     if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
         blockedCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    return this->origin();
+    return origin();
 }
 
-struct OptParams {
-    std::string option;
-    std::optional<bool> value;
-};
-
-void registerCommands() {
-    auto& cmd = ll::command::CommandRegistrar::getInstance(false).getOrCreateCommand(
-        "opt",
-        "Toggle optimization options and view stats",
-        CommandPermissionLevel::GameDirectors
-    );
-
-    cmd.overload<OptParams>()
-        .required("option")
-        .optional("value")
-        .execute([](CommandOrigin const& origin, CommandOutput& output, OptParams const& params) {
-            auto& cfg = getConfig();
-
-            if (params.option == "stats") {
-                output.success("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
+// 调试任务：每秒输出统计
+void startDebugTask() {
+    ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
+        while (true) {
+            co_await 1s; // 等待1秒
+            if (getConfig().debug) {
+                logger().info("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
             }
-            else if (params.option == "reset") {
-                resetBlockedCount();
-                output.success("RandomTick optimization stats reset.");
-            }
-            else if (params.option == "randomtick") {
-                bool query = !params.value.has_value();
-                bool newVal = query ? false : *params.value;
-                if (query) {
-                    output.success("RandomTick optimization is currently {}",
-                                   cfg.randomTick ? "enabled" : "disabled");
-                } else {
-                    cfg.randomTick = newVal;
-                    saveConfig();
-                    output.success("RandomTick optimization has been {}",
-                                   newVal ? "enabled" : "disabled");
-                }
-            }
-            else {
-                output.error("Unknown option. Available: randomtick, stats, reset");
-            }
-        });
+        }
+    }).launch(ll::thread::ServerThreadExecutor::getDefault());
 }
 
 PluginImpl& PluginImpl::getInstance() {
@@ -129,20 +87,25 @@ bool PluginImpl::load() {
         logger().warn("Failed to load config, using default values and saving");
         saveConfig();
     }
-    logger().info("Plugin loaded. RandomTick optimization: {}", config.randomTick ? "enabled" : "disabled");
+    logger().info("Plugin loaded. RandomTick optimization: {}, debug: {}",
+                  config.randomTick ? "enabled" : "disabled",
+                  config.debug ? "enabled" : "disabled");
     return true;
 }
 
 bool PluginImpl::enable() {
-    registerCommands();
-    // 钩子已自动注册
+    // 如果debug开启，启动调试任务
+    if (config.debug) {
+        startDebugTask();
+    }
     logger().info("Plugin enabled");
     return true;
 }
 
 bool PluginImpl::disable() {
-    // 可选：卸载钩子
     ShouldRandomTickHook::unhook();
+    // 协程任务会在插件禁用时自动销毁吗？可能不会，但我们可以不手动处理，因为任务会随着executor关闭而停止。
+    // 更好的是保留任务句柄，但简单起见，我们不做复杂处理。
     logger().info("Plugin disabled");
     return true;
 }
