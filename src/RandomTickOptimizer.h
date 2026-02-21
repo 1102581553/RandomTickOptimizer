@@ -9,7 +9,8 @@ namespace random_tick_optimizer {
 
 struct Config {
     int version = 1;
-    bool randomTick = false;
+    bool randomTick = false;  // 随机刻优化开关
+    bool debug = false;       // 调试开关，开启后每秒输出优化统计
 };
 
 Config& getConfig();
