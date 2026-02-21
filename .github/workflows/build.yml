@@ -32,10 +32,10 @@ jobs:
       - run: xmake repo -u
 
       # ✅ 修复：移除所有 --target_type 参数
-      - run: xmake f -a x64 -m release -p windows -v -y --j4 -q
+      - run: xmake f -a x64 -m release -p windows -v -y -q
 
       # ✅ 修复：移除所有 --target_type 参数
-      - run: xmake -v -y --j4 -q
+      - run: xmake -v -y -q
 
       - uses: actions/upload-artifact@v6
         with:
