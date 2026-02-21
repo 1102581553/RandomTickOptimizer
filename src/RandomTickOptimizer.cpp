@@ -2,11 +2,11 @@
 #include "ll/api/command/CommandHandle.h"
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/memory/Hook.h"
+#include "ll/api/mod/RegisterHelper.h"
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
 #include "mc/world/level/block/Block.h"
-#include "mc/world/level/block/LegacyBlock.h"
 #include <filesystem>
 #include <unordered_set>
 
@@ -31,12 +31,12 @@ uint64_t getBlockedCount() { return blockedCount.load(std::memory_order_relaxed)
 void resetBlockedCount() { blockedCount.store(0, std::memory_order_relaxed); }
 
 bool loadConfig() {
-    auto path = getSelf().getConfigDir() / "config.json";
+    auto path = getInstance().getSelf().getConfigDir() / "config.json";
     return ll::config::loadConfig(config, path);
 }
 
 bool saveConfig() {
-    auto path = getSelf().getConfigDir() / "config.json";
+    auto path = getInstance().getSelf().getConfigDir() / "config.json";
     return ll::config::saveConfig(config, path);
 }
 
@@ -47,6 +47,7 @@ ll::io::Logger& logger() {
     return *log;
 }
 
+// 钩子：自动注册
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ShouldRandomTickHook,
     ll::memory::HookPriority::Normal,
@@ -57,7 +58,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     if (!getConfig().randomTick) {
         return origin();
     }
-    int id = this->getLegacyBlock().getBlockItemId();
+    int id = this->getId();  // 使用 Block::getId() 获取方块ID
     if (EXCLUDED_BLOCK_IDS.contains(id)) {
         blockedCount.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -65,16 +66,12 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     return origin();
 }
 
-void PluginImpl::initHooks() {
-    logger().debug("Hooks initialized");
-}
-
 struct OptParams {
     std::string option;
     std::optional<bool> value;
 };
 
-void PluginImpl::registerCommands() {
+void registerCommands() {
     auto& cmd = ll::command::CommandRegistrar::getInstance().getOrCreateCommand(
         "opt",
         "Toggle optimization options and view stats",
@@ -84,7 +81,7 @@ void PluginImpl::registerCommands() {
     cmd.overload<OptParams>()
         .required("option")
         .optional("value")
-        .execute([this](CommandOrigin const& origin, CommandOutput& output, OptParams const& params) {
+        .execute([](CommandOrigin const& origin, CommandOutput& output, OptParams const& params) {
             auto& cfg = getConfig();
 
             if (params.option == "stats") {
@@ -113,10 +110,13 @@ void PluginImpl::registerCommands() {
         });
 }
 
-PluginImpl::PluginImpl(ll::mod::Manifest manifest) : NativeMod(std::move(manifest)) {}
+PluginImpl& PluginImpl::getInstance() {
+    static PluginImpl instance;
+    return instance;
+}
 
-bool PluginImpl::onLoad() {
-    std::filesystem::create_directories(getConfigDir());
+bool PluginImpl::load() {
+    std::filesystem::create_directories(getSelf().getConfigDir());
     if (!loadConfig()) {
         logger().warn("Failed to load config, using default values and saving");
         saveConfig();
@@ -125,17 +125,20 @@ bool PluginImpl::onLoad() {
     return true;
 }
 
-bool PluginImpl::onEnable() {
+bool PluginImpl::enable() {
     registerCommands();
-    initHooks();
+    // 钩子已自动注册，无需手动调用
+    logger().info("Plugin enabled");
     return true;
 }
 
-bool PluginImpl::onDisable() {
-    ShouldRandomTickHook::unhook();
+bool PluginImpl::disable() {
+    // 如果需要卸载钩子，可以调用 ShouldRandomTickHook::unhook();
+    // 但 AUTO 钩子通常会自动卸载，无需手动
+    logger().info("Plugin disabled");
     return true;
 }
 
 } // namespace random_tick_optimizer
 
-LL_REGISTER_MOD(random_tick_optimizer::PluginImpl, random_tick_optimizer::logger());
+LL_REGISTER_MOD(random_tick_optimizer::PluginImpl, random_tick_optimizer::PluginImpl::getInstance());
