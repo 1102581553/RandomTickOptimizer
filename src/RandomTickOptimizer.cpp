@@ -4,13 +4,15 @@
 #include "ll/api/memory/Hook.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/service/Bedrock.h"
+#include "ll/api/io/LoggerRegistry.h"
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
 #include "mc/world/level/block/Block.h"
-#include "ll/api/io/LoggerRegistry.h"
 #include <filesystem>
 #include <unordered_set>
+#include <optional>   // 显式包含 std::optional
+#include <string>     // 显式包含 std::string
 
 namespace random_tick_optimizer {
 
@@ -58,9 +60,8 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Block::shouldRandomTick,
     bool
 ) {
-    (void)origin;
     if (!getConfig().randomTick) {
-        return origin();
+        return this->origin();  // 正确调用原函数
     }
     // 使用方块类型名判断
     std::string blockName = this->getTypeName();
@@ -68,7 +69,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
         blockedCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    return origin();
+    return this->origin();
 }
 
 struct OptParams {
