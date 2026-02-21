@@ -45,6 +45,5 @@ target("RandomTickOptimizer")
     set_targetdir("bin")
     set_runtimes("MD")
     set_pcxxflags("-fPIC")
-    add_cxflags("-j4")  -- 4线程并行编译
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
