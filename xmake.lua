@@ -9,7 +9,7 @@ option("target_type")
 option_end()
 
 add_requires("levilamina", {configs = {target_type = get_config("target_type")}})
-add_requires("levibuildscript")  -- 用于自动链接和打包
+add_requires("levibuildscript")
 
 if not has_config("vs_runtime") then
     set_runtimes("MD")
@@ -28,8 +28,3 @@ target("RandomTickOptimizer")
     add_headerfiles("src/*.h")
     add_files("src/*.cpp")
     add_includedirs("src")
-    if is_config("target_type", "server") then
-        -- 服务端特有源码（如果有）
-    else
-        -- 客户端特有源码（如果有）
-    end
