@@ -3,6 +3,7 @@
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/memory/Hook.h"
 #include "ll/api/mod/RegisterHelper.h"
+#include "ll/api/service/Bedrock.h"
 #include "mc/server/commands/CommandOrigin.h"
 #include "mc/server/commands/CommandOutput.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
@@ -16,13 +17,14 @@ static Config config;
 static std::unique_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
 
-static const std::unordered_set<int> EXCLUDED_BLOCK_IDS = {
-    -378, // deepslate
-    0,    // air
-    1,    // stone
-    3,    // dirt
-    9,    // water
-    87    // netherrack
+// 使用方块名称判断，避免 ID 变化
+static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
+    "minecraft:deepslate",
+    "minecraft:air",
+    "minecraft:stone",
+    "minecraft:dirt",
+    "minecraft:water",
+    "minecraft:netherrack"
 };
 
 Config& getConfig() { return config; }
@@ -31,12 +33,12 @@ uint64_t getBlockedCount() { return blockedCount.load(std::memory_order_relaxed)
 void resetBlockedCount() { blockedCount.store(0, std::memory_order_relaxed); }
 
 bool loadConfig() {
-    auto path = getInstance().getSelf().getConfigDir() / "config.json";
+    auto path = PluginImpl::getInstance().getSelf().getConfigDir() / "config.json";
     return ll::config::loadConfig(config, path);
 }
 
 bool saveConfig() {
-    auto path = getInstance().getSelf().getConfigDir() / "config.json";
+    auto path = PluginImpl::getInstance().getSelf().getConfigDir() / "config.json";
     return ll::config::saveConfig(config, path);
 }
 
@@ -58,8 +60,9 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     if (!getConfig().randomTick) {
         return origin();
     }
-    int id = this->getId();  // 使用 Block::getId() 获取方块ID
-    if (EXCLUDED_BLOCK_IDS.contains(id)) {
+    // 使用方块类型名判断
+    std::string blockName = this->getTypeName();
+    if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
         blockedCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -127,14 +130,14 @@ bool PluginImpl::load() {
 
 bool PluginImpl::enable() {
     registerCommands();
-    // 钩子已自动注册，无需手动调用
+    // 钩子已自动注册
     logger().info("Plugin enabled");
     return true;
 }
 
 bool PluginImpl::disable() {
-    // 如果需要卸载钩子，可以调用 ShouldRandomTickHook::unhook();
-    // 但 AUTO 钩子通常会自动卸载，无需手动
+    // 可选：卸载钩子
+    ShouldRandomTickHook::unhook();
     logger().info("Plugin disabled");
     return true;
 }
