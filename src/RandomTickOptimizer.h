@@ -1,7 +1,7 @@
 #pragma once
 #include <ll/api/Config.h>
 #include <ll/api/io/Logger.h>
-#include <ll/api/Plugin.h>   // 注意：没有 plugin/ 子目录
+#include <ll/api/mod/NativeMod.h>
 #include <memory>
 #include <atomic>
 
@@ -21,12 +21,14 @@ void resetBlockedCount();
 
 ll::io::Logger& logger();
 
-class PluginImpl : public ll::plugin::Plugin {
+class PluginImpl : public ll::mod::NativeMod {
 public:
-    explicit PluginImpl(ll::plugin::Manifest manifest);
+    explicit PluginImpl(ll::mod::Manifest manifest);
+
     bool onLoad() override;
     bool onEnable() override;
     bool onDisable() override;
+
 private:
     void registerCommands();
     void initHooks();
