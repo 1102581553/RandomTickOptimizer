@@ -20,23 +20,21 @@ jobs:
         with:
           xmake-version: latest
 
-      # ✅ 优化1: 修复缓存路径（xmake 默认路径是 ~/.xmake，不是 ~/AppData/Local/.xmake）
+      # ✅ 修复：缓存路径使用 ~/.xmake（xmake 默认路径）
       - uses: actions/cache@v5
         with:
           path: |
             ~/.xmake
-          key: xmake-${{ runner.os }}-${{ hashFiles('xmake.lua') }}-${{ matrix.target_type }}
+          key: xmake-${{ runner.os }}-${{ hashFiles('xmake.lua') }}
           restore-keys: |
-            xmake-${{ runner.os }}-${{ hashFiles('xmake.lua') }}-
             xmake-${{ runner.os }}-
 
       - run: xmake repo -u
 
-      # ✅ 优化2: 添加 -j4 选项实现并行编译
-      # ✅ 优化3: 添加 -q 选项减少日志输出
-      - run: xmake f -a x64 -m release -p windows -v --target_type=${{ matrix.target_type }} -y --j4 -q
+      # ✅ 修复：移除所有 --target_type 参数
+      - run: xmake f -a x64 -m release -p windows -v -y --j4 -q
 
-      # ✅ 优化4: 添加 -j4 选项到构建命令
+      # ✅ 修复：移除所有 --target_type 参数
       - run: xmake -v -y --j4 -q
 
       - uses: actions/upload-artifact@v6
