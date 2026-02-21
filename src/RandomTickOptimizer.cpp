@@ -12,12 +12,10 @@
 
 namespace random_tick_optimizer {
 
-// 静态变量
 static Config config;
 static std::unique_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
 
-// 禁止随机刻的方块ID（根据 BDS 1.21.x 调整）
 static const std::unordered_set<int> EXCLUDED_BLOCK_IDS = {
     -378, // deepslate
     0,    // air
@@ -27,7 +25,6 @@ static const std::unordered_set<int> EXCLUDED_BLOCK_IDS = {
     87    // netherrack
 };
 
-// 全局访问实现
 Config& getConfig() { return config; }
 
 uint64_t getBlockedCount() { return blockedCount.load(std::memory_order_relaxed); }
@@ -50,18 +47,17 @@ ll::io::Logger& logger() {
     return *log;
 }
 
-// 钩子：自动注册
+// 使用字符串符号钩子，避免编译时符号查找问题
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ShouldRandomTickHook,
     ll::memory::HookPriority::Normal,
     Block,
-    &Block::shouldRandomTick,
+    "?shouldRandomTick@Block@@QEBA_NXZ",
     bool
 ) {
     if (!getConfig().randomTick) {
         return origin();
     }
-    // 获取方块ID（若SDK方法不同，请调整）
     int id = this->getLegacyBlock().getBlockItemId();
     if (EXCLUDED_BLOCK_IDS.contains(id)) {
         blockedCount.fetch_add(1, std::memory_order_relaxed);
@@ -71,11 +67,9 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 }
 
 void PluginImpl::initHooks() {
-    // 钩子已自动注册，无需额外操作
     logger().debug("Hooks initialized");
 }
 
-// 命令参数结构
 struct OptParams {
     std::string option;
     std::optional<bool> value;
@@ -120,11 +114,9 @@ void PluginImpl::registerCommands() {
         });
 }
 
-// 插件类实现
 PluginImpl::PluginImpl(ll::plugin::Manifest manifest) : Plugin(std::move(manifest)) {}
 
 bool PluginImpl::onLoad() {
-    // 创建配置目录
     std::filesystem::create_directories(getConfigDir());
     if (!loadConfig()) {
         logger().warn("Failed to load config, using default values and saving");
@@ -147,5 +139,4 @@ bool PluginImpl::onDisable() {
 
 } // namespace random_tick_optimizer
 
-// 插件入口宏
 LL_REGISTER_PLUGIN(random_tick_optimizer::PluginImpl, random_tick_optimizer::logger());
