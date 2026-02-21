@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <unordered_set>
 #include <chrono>
+#include <string>  // ✅ 新增：添加 string 头文件
 
 namespace random_tick_optimizer {
 
@@ -41,7 +42,8 @@ bool saveConfig() {
 
 ll::io::Logger& logger() {
     if (!log) {
-        log = std::make_unique<ll::io::Logger>("RandomTickOptimizer");
+        // ✅ 修复：显式转换为 std::string
+        log = std::make_unique<ll::io::Logger>(std::string("RandomTickOptimizer"));
     }
     return *log;
 }
@@ -69,7 +71,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 void startDebugTask() {
     ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
         while (true) {
-            co_await std::chrono::seconds(1); // ✅ 修复：使用 std::chrono::seconds(1) 替代 1s
+            co_await std::chrono::seconds(1); // ✅ 修复：使用 std::chrono::seconds(1)
             if (getConfig().debug) {
                 logger().info("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
             }
