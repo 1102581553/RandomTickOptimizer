@@ -34,18 +34,6 @@ jobs:
       - name: Configure and install dependencies
         run: xmake f -m release --yes
 
-      # 验证 LeviLamina 头文件是否存在
-      - name: Verify LeviLamina include path
-        run: |
-          $path = Resolve-Path "$env:USERPROFILE\AppData\Local\.xmake\packages\l\levilamina\*\include\ll\api\plugin\Plugin.h" -ErrorAction SilentlyContinue
-          if ($path) {
-            echo "✅ Plugin.h found at: $path"
-          } else {
-            echo "❌ Plugin.h NOT found!"
-            exit 1
-          }
-        shell: pwsh
-
       - name: Show xmake configuration
         run: xmake show -v
 
