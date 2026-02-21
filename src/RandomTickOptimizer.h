@@ -1,7 +1,7 @@
 #pragma once
-#include "ll/api/Config.h"
-#include "ll/api/io/Logger.h"
-#include "ll/api/plugin/Plugin.h"
+#include <ll/api/Config.h>
+#include <ll/api/io/Logger.h>
+#include <ll/api/plugin/Plugin.h>
 #include <memory>
 #include <atomic>
 
