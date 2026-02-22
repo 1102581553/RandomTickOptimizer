@@ -7,8 +7,9 @@
 #include "ll/api/io/Logger.h"
 #include "ll/api/io/LoggerRegistry.h"
 #include "mc/world/level/block/Block.h"
-#include "mc/world/level/block/components/BlockRandomTickingComponent.h"  // 新增头文件
-#include "mc/world/events/BlockRandomTickEvent.h"                         // 事件定义
+#include "mc/world/level/block/components/BlockRandomTickingComponent.h"
+#include "mc/world/level/block/block_events/BlockRandomTickLegacyEvent.h" // 正确头文件
+#include "mc/world/level/BlockSource.h"
 #include <filesystem>
 #include <unordered_set>
 #include <chrono>
@@ -19,9 +20,8 @@ namespace random_tick_optimizer {
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
-static bool hookInstalled = false;  // 标记钩子是否已安装
+static bool hookInstalled = false;
 
-// 排除列表
 static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
     "minecraft:deepslate",
     "minecraft:air",
@@ -53,8 +53,7 @@ ll::io::Logger& logger() {
     return *log;
 }
 
-// 钩子：BlockRandomTickingComponent::onTick
-// 使用 LL_TYPE_INSTANCE_HOOK 以便手动安装/卸载
+// 手动钩子：BlockRandomTickingComponent::onTick
 LL_TYPE_INSTANCE_HOOK(
     RandomTickComponentOnTickHook,
     ll::memory::HookPriority::Normal,
@@ -63,27 +62,24 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     ::BlockEvents::BlockRandomTickLegacyEvent const& eventData
 ) {
-    // 如果优化关闭，直接调用原函数
     if (!getConfig().randomTick) {
         origin(eventData);
         return;
     }
 
-    // 通过 BlockSourceHandle 获取 BlockSource 指针
-    auto* blockSource = eventData.mBlockSourceHandle ? eventData.mBlockSourceHandle->get() : nullptr;
-    if (blockSource) {
-        const BlockPos& pos = eventData.mBlockPos;  // 事件中应包含方块位置
-        const Block& block = blockSource->getBlock(pos);
-        std::string blockName = block.getTypeName();
+    // 直接使用事件成员
+    const BlockPos& pos = eventData.mPos;          // 继承自基类
+    BlockSource& region = eventData.mRegion;       // BlockSource&
+    const Block& block = region.getBlock(pos);
+    std::string blockName = block.getTypeName();
 
-        if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
-            blockedCount.fetch_add(1, std::memory_order_relaxed);
-            logger().debug("Blocked random tick for {} at {}", blockName, pos.toString());
-            return;  // 阻止随机刻
-        }
+    if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
+        blockedCount.fetch_add(1, std::memory_order_relaxed);
+        logger().debug("Blocked random tick for {} at ({}, {}, {})",
+                       blockName, pos.x, pos.y, pos.z);
+        return; // 阻止随机刻
     }
 
-    // 其他方块正常处理
     origin(eventData);
 }
 
@@ -120,7 +116,6 @@ bool PluginImpl::enable() {
     logger().info("enable() called, config.randomTick = {}", config.randomTick ? "true" : "false");
     logger().info("enable() called, config.debug = {}", config.debug ? "true" : "false");
 
-    // 安装钩子（仅一次）
     if (!hookInstalled) {
         RandomTickComponentOnTickHook::hook();
         hookInstalled = true;
@@ -135,7 +130,6 @@ bool PluginImpl::enable() {
 }
 
 bool PluginImpl::disable() {
-    // 卸载钩子
     if (hookInstalled) {
         RandomTickComponentOnTickHook::unhook();
         hookInstalled = false;
