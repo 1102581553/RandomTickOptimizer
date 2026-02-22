@@ -7,6 +7,8 @@
 #include "ll/api/io/Logger.h"
 #include "ll/api/io/LoggerRegistry.h"
 #include "mc/world/level/block/Block.h"
+#include "mc/world/level/block/components/BlockRandomTickingComponent.h"  // 新增头文件
+#include "mc/world/events/BlockRandomTickEvent.h"                         // 事件定义
 #include <filesystem>
 #include <unordered_set>
 #include <chrono>
@@ -17,7 +19,9 @@ namespace random_tick_optimizer {
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
+static bool hookInstalled = false;  // 标记钩子是否已安装
 
+// 排除列表
 static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
     "minecraft:deepslate",
     "minecraft:air",
@@ -49,33 +53,38 @@ ll::io::Logger& logger() {
     return *log;
 }
 
-// 钩子：添加详细日志以便调试
-LL_AUTO_TYPE_INSTANCE_HOOK(
-    ShouldRandomTickHook,
+// 钩子：BlockRandomTickingComponent::onTick
+// 使用 LL_TYPE_INSTANCE_HOOK 以便手动安装/卸载
+LL_TYPE_INSTANCE_HOOK(
+    RandomTickComponentOnTickHook,
     ll::memory::HookPriority::Normal,
-    Block,
-    &Block::shouldRandomTick,
-    bool
+    BlockRandomTickingComponent,
+    &BlockRandomTickingComponent::onTick,
+    void,
+    ::BlockEvents::BlockRandomTickLegacyEvent const& eventData
 ) {
-    bool original = origin();  // 先调用原函数获取原始返回值
-    std::string blockName = this->getTypeName();
-
-    // 输出每次调用的日志（debug级别）
-    logger().debug("Block '{}' shouldRandomTick = {}", blockName, original);
-
-    // 如果优化关闭，直接返回原始值
+    // 如果优化关闭，直接调用原函数
     if (!getConfig().randomTick) {
-        return original;
+        origin(eventData);
+        return;
     }
 
-    // 检查是否在排除列表中
-    if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
-        blockedCount.fetch_add(1, std::memory_order_relaxed);
-        logger().debug(" -> Blocked (count now {})", getBlockedCount());
-        return false;  // 阻止随机刻
+    // 通过 BlockSourceHandle 获取 BlockSource 指针
+    auto* blockSource = eventData.mBlockSourceHandle ? eventData.mBlockSourceHandle->get() : nullptr;
+    if (blockSource) {
+        const BlockPos& pos = eventData.mBlockPos;  // 事件中应包含方块位置
+        const Block& block = blockSource->getBlock(pos);
+        std::string blockName = block.getTypeName();
+
+        if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
+            blockedCount.fetch_add(1, std::memory_order_relaxed);
+            logger().debug("Blocked random tick for {} at {}", blockName, pos.toString());
+            return;  // 阻止随机刻
+        }
     }
 
-    return original;  // 其他方块保持原样
+    // 其他方块正常处理
+    origin(eventData);
 }
 
 // 调试任务：每秒输出统计
@@ -108,9 +117,15 @@ bool PluginImpl::load() {
 }
 
 bool PluginImpl::enable() {
-    // 输出当前配置值，便于检查
     logger().info("enable() called, config.randomTick = {}", config.randomTick ? "true" : "false");
     logger().info("enable() called, config.debug = {}", config.debug ? "true" : "false");
+
+    // 安装钩子（仅一次）
+    if (!hookInstalled) {
+        RandomTickComponentOnTickHook::hook();
+        hookInstalled = true;
+        logger().debug("RandomTick hook installed");
+    }
 
     if (config.debug) {
         startDebugTask();
@@ -120,8 +135,12 @@ bool PluginImpl::enable() {
 }
 
 bool PluginImpl::disable() {
-    // 注意：暂时注释掉 unhook 以保持钩子始终生效，方便调试
-    // ShouldRandomTickHook::unhook();
+    // 卸载钩子
+    if (hookInstalled) {
+        RandomTickComponentOnTickHook::unhook();
+        hookInstalled = false;
+        logger().debug("RandomTick hook uninstalled");
+    }
 
     logger().info("Plugin disabled");
     return true;
