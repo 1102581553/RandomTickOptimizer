@@ -4,16 +4,18 @@
 #include "ll/api/coro/CoroTask.h"
 #include "ll/api/thread/ServerThreadExecutor.h"
 #include "ll/api/chrono/GameChrono.h"
+#include "ll/api/io/Logger.h"           // ✅ 添加 Logger 头文件
+#include "ll/api/io/LoggerRegistry.h"    // ✅ 添加 LoggerRegistry 头文件
 #include "mc/world/level/block/Block.h"
 #include <filesystem>
 #include <unordered_set>
 #include <chrono>
-#include <string>  // ✅ 新增：添加 string 头文件
+#include <string>
 
 namespace random_tick_optimizer {
 
 static Config config;
-static std::unique_ptr<ll::io::Logger> log;
+static std::shared_ptr<ll::io::Logger> log;   // ✅ 改为 shared_ptr
 static std::atomic<uint64_t> blockedCount{0};
 
 static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
@@ -42,10 +44,10 @@ bool saveConfig() {
 
 ll::io::Logger& logger() {
     if (!log) {
-        // ✅ 修复：显式转换为 std::string
-        log = std::make_unique<ll::io::Logger>(std::string("RandomTickOptimizer"));
+        // ✅ 正确：通过 LoggerRegistry 获取 shared_ptr
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("RandomTickOptimizer");
     }
-    return *log;
+    return *log;   // 解引用返回引用，保持接口一致
 }
 
 // 钩子：自动注册
@@ -71,7 +73,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 void startDebugTask() {
     ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
         while (true) {
-            co_await std::chrono::seconds(1); // ✅ 修复：使用 std::chrono::seconds(1)
+            co_await std::chrono::seconds(1);
             if (getConfig().debug) {
                 logger().info("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
             }
