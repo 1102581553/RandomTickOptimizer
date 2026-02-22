@@ -8,7 +8,7 @@
 #include "ll/api/io/LoggerRegistry.h"
 #include "mc/world/level/block/Block.h"
 #include "mc/world/level/block/components/BlockRandomTickingComponent.h"
-#include "mc/world/level/block/block_events/BlockRandomTickLegacyEvent.h" // 正确头文件
+#include "mc/world/level/block/block_events/BlockRandomTickLegacyEvent.h"
 #include "mc/world/level/BlockSource.h"
 #include <filesystem>
 #include <unordered_set>
@@ -22,13 +22,9 @@ static std::shared_ptr<ll::io::Logger> log;
 static std::atomic<uint64_t> blockedCount{0};
 static bool hookInstalled = false;
 
+// 临时清空排除列表，用于观察所有随机刻
 static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
-    "minecraft:deepslate",
-    "minecraft:air",
-    "minecraft:stone",
-    "minecraft:dirt",
-    "minecraft:water",
-    "minecraft:netherrack"
+    // 暂时不排除任何方块
 };
 
 Config& getConfig() { return config; }
@@ -62,21 +58,24 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     ::BlockEvents::BlockRandomTickLegacyEvent const& eventData
 ) {
+    // 无条件输出钩子触发信息，用于诊断
+    const BlockPos& pos = eventData.mPos;
+    BlockSource& region = eventData.mRegion;
+    const Block& block = region.getBlock(pos);
+    std::string blockName = block.getTypeName();
+
+    logger().debug("RandomTick hook triggered for {} at ({}, {}, {})",
+                   blockName, pos.x, pos.y, pos.z);
+
+    // 如果优化关闭，直接调用原函数
     if (!getConfig().randomTick) {
         origin(eventData);
         return;
     }
 
-    // 直接使用事件成员
-    const BlockPos& pos = eventData.mPos;          // 继承自基类
-    BlockSource& region = eventData.mRegion;       // BlockSource&
-    const Block& block = region.getBlock(pos);
-    std::string blockName = block.getTypeName();
-
     if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
         blockedCount.fetch_add(1, std::memory_order_relaxed);
-        logger().debug("Blocked random tick for {} at ({}, {}, {})",
-                       blockName, pos.x, pos.y, pos.z);
+        logger().debug(" -> Blocked (count now {})", getBlockedCount());
         return; // 阻止随机刻
     }
 
