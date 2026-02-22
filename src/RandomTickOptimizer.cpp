@@ -1,36 +1,48 @@
-#include "RandomTickOptimizer.h"
-#include "ll/api/memory/Hook.h"
-#include "ll/api/mod/RegisterHelper.h"
-#include "ll/api/coro/CoroTask.h"
-#include "ll/api/thread/ServerThreadExecutor.h"
-#include "ll/api/chrono/GameChrono.h"
-#include "ll/api/io/Logger.h"
-#include "ll/api/io/LoggerRegistry.h"
-#include "mc/world/level/block/Block.h"
-#include "mc/world/level/block/components/BlockRandomTickingComponent.h"
-#include "mc/world/level/block/block_events/BlockRandomTickLegacyEvent.h"
-#include "mc/world/level/BlockSource.h"
+#include "RedstoneOptimizer.h"
+#include <ll/api/memory/Hook.h>
+#include <ll/api/mod/RegisterHelper.h>
+#include <ll/api/service/Bedrock.h>
+#include <ll/api/io/LoggerRegistry.h>
+#include <ll/api/chrono/GameChrono.h>
+#include <ll/api/coro/CoroTask.h>
+#include <ll/api/thread/ServerThreadExecutor.h>
+#include <mc/world/level/Level.h>
+#include <mc/world/redstone/circuit/CircuitSceneGraph.h>
+#include <mc/world/redstone/circuit/ChunkCircuitComponentList.h>
+#include <mc/world/redstone/circuit/components/ConsumerComponent.h>
+#include <mc/world/redstone/circuit/components/CapacitorComponent.h>
+#include <algorithm>
 #include <filesystem>
-#include <unordered_set>
-#include <chrono>
-#include <string>
+#include <typeinfo>
+#include <atomic>
+#include <mutex>
+#include <exception>
 
-namespace random_tick_optimizer {
+namespace redstone_optimizer {
 
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
-static std::atomic<uint64_t> blockedCount{0};
+static std::unordered_map<void*, CacheEntry> cache;
+static std::mutex cacheMutex;
 static bool hookInstalled = false;
+static std::atomic<bool> debugTaskRunning = false;
 
-// 临时清空排除列表，用于观察所有随机刻
-static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
-    // 暂时不排除任何方块
-};
+static std::atomic<size_t> cacheHitCount = 0;
+static std::atomic<size_t> cacheMissCount = 0;
+static std::atomic<size_t> cacheSkipCount = 0;
+
+// 递归深度检测（每个线程独立）
+thread_local int evaluateDepth = 0;
+constexpr int MAX_EVALUATE_DEPTH = 500;
 
 Config& getConfig() { return config; }
 
-uint64_t getBlockedCount() { return blockedCount.load(std::memory_order_relaxed); }
-void resetBlockedCount() { blockedCount.store(0, std::memory_order_relaxed); }
+std::unordered_map<void*, CacheEntry>& getCache() { return cache; }
+
+void clearCache() {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    cache.clear();
+}
 
 bool loadConfig() {
     auto path = PluginImpl::getInstance().getSelf().getConfigDir() / "config.json";
@@ -44,54 +56,195 @@ bool saveConfig() {
 
 ll::io::Logger& logger() {
     if (!log) {
-        log = ll::io::LoggerRegistry::getInstance().getOrCreate("RandomTickOptimizer");
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("RedstoneOptimizer");
     }
     return *log;
 }
 
-// 手动钩子：BlockRandomTickingComponent::onTick
-LL_TYPE_INSTANCE_HOOK(
-    RandomTickComponentOnTickHook,
-    ll::memory::HookPriority::Normal,
-    BlockRandomTickingComponent,
-    &BlockRandomTickingComponent::onTick,
-    void,
-    ::BlockEvents::BlockRandomTickLegacyEvent const& eventData
-) {
-    // 无条件输出钩子触发信息，用于诊断
-    const BlockPos& pos = eventData.mPos;
-    BlockSource& region = eventData.mRegion;
-    const Block& block = region.getBlock(pos);
-    std::string blockName = block.getTypeName();
-
-    logger().debug("RandomTick hook triggered for {} at ({}, {}, {})",
-                   blockName, pos.x, pos.y, pos.z);
-
-    // 如果优化关闭，直接调用原函数
-    if (!getConfig().randomTick) {
-        origin(eventData);
-        return;
-    }
-
-    if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
-        blockedCount.fetch_add(1, std::memory_order_relaxed);
-        logger().debug(" -> Blocked (count now {})", getBlockedCount());
-        return; // 阻止随机刻
-    }
-
-    origin(eventData);
+uint64_t getCurrentTickID() {
+    auto level = ll::service::getLevel();
+    if (!level) return 0;
+    return level->getCurrentTick().tickID;
 }
 
-// 调试任务：每秒输出统计
+bool hasInternalTimer(BaseCircuitComponent* comp) {
+    return dynamic_cast<CapacitorComponent*>(comp) != nullptr;
+}
+
+uint64_t computeInputHash(ConsumerComponent* comp) {
+    auto* sources = comp->mSources.operator->();
+    if (!sources) return 0;
+
+    uint64_t hash = 0;
+    try {
+        for (const auto& item : sources->mComponents) {
+            BaseCircuitComponent* source = item.mComponent;
+            if (!source) continue;
+            size_t typeHash = typeid(*source).hash_code();
+            int strength = source->getStrength();
+            hash = hash * 31 + typeHash;
+            hash = hash * 31 + strength;
+            hash = hash * 31 + item.mDampening;
+            hash = hash * 31 + (item.mDirectlyPowered ? 1 : 0);
+            hash = hash * 31 + item.mDirection;
+            hash = hash * 31 + item.mData;
+        }
+    } catch (const std::exception& e) {
+        logger().error("Exception in computeInputHash: {}", e.what());
+    }
+    return hash;
+}
+
 void startDebugTask() {
+    if (debugTaskRunning.exchange(true)) return;
     ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
-        while (true) {
+        while (debugTaskRunning) {
             co_await std::chrono::seconds(1);
-            if (getConfig().debug) {
-                logger().info("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
+            ll::thread::ServerThreadExecutor::getDefault().execute([]{
+                if (!getConfig().debug) return;
+                size_t total = cacheHitCount + cacheMissCount;
+                double hitRate = total > 0 ? (100.0 * cacheHitCount / total) : 0.0;
+                std::lock_guard<std::mutex> lock(cacheMutex);
+                logger().info("Cache stats: hits={}, misses={}, skip={}, size={}, hitRate={:.1f}%",
+                              cacheHitCount.load(), cacheMissCount.load(), cacheSkipCount.load(),
+                              getCache().size(), hitRate);
+            });
+        }
+        debugTaskRunning = false;
+    }).launch(ll::thread::ServerThreadExecutor::getDefault());
+}
+
+void stopDebugTask() {
+    debugTaskRunning = false;
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    CircuitSceneGraphAddHook,
+    ll::memory::HookPriority::Normal,
+    CircuitSceneGraph,
+    &CircuitSceneGraph::add,
+    void,
+    BlockPos const& pos,
+    std::unique_ptr<BaseCircuitComponent> component
+) {
+    origin(pos, std::move(component));
+    if (!getConfig().enabled) return;
+
+    ChunkPos chunkPos(pos);
+    BlockPos chunkBlockPos(chunkPos.x, 0, chunkPos.z);
+    auto& chunkList = this->mActiveComponentsPerChunk[chunkBlockPos];
+
+    auto* pCompVec = chunkList.mComponents.operator->();
+    if (pCompVec && !pCompVec->empty()) {
+        std::sort(pCompVec->begin(), pCompVec->end(),
+            [](const ChunkCircuitComponentList::Item& a, const ChunkCircuitComponentList::Item& b) {
+                if (a.mPos->x != b.mPos->x) return a.mPos->x < b.mPos->x;
+                if (a.mPos->z != b.mPos->z) return a.mPos->z < b.mPos->z;
+                return a.mPos->y < b.mPos->y;
+            });
+    }
+    chunkList.bShouldEvaluate = true;
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    ConsumerComponentEvaluateHook,
+    ll::memory::HookPriority::Normal,
+    ConsumerComponent,
+    &ConsumerComponent::$evaluate,
+    bool,
+    CircuitSystem& system,
+    BlockPos const& pos
+) {
+    // 递归深度检测
+    ++evaluateDepth;
+    if (evaluateDepth > MAX_EVALUATE_DEPTH) {
+        logger().warn("Evaluate depth exceeded at ({},{},{}) depth={}", pos.x, pos.y, pos.z, evaluateDepth);
+        bool result = origin(system, pos);
+        --evaluateDepth;
+        return result;
+    }
+
+    try {
+        if (!getConfig().enabled) {
+            ++cacheSkipCount;
+            bool result = origin(system, pos);
+            --evaluateDepth;
+            return result;
+        }
+
+        if (hasInternalTimer(this)) {
+            ++cacheSkipCount;
+            bool result = origin(system, pos);
+            --evaluateDepth;
+            return result;
+        }
+
+        uint64_t currentHash = computeInputHash(this);
+
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto it = getCache().find(this);
+
+        if (it != getCache().end() && it->second.inputHash == currentHash) {
+            int oldStrength = this->getStrength();
+            int cachedStrength = it->second.lastOutputStrength;
+
+            if (oldStrength != cachedStrength) {
+                this->setStrength(cachedStrength);
+                if (getConfig().debug) {
+                    logger().debug("Cache hit & updated at ({},{},{})", pos.x, pos.y, pos.z);
+                }
+                ++cacheHitCount;
+                --evaluateDepth;
+                return true;
+            } else {
+                if (getConfig().debug) {
+                    logger().debug("Cache hit (no change) at ({},{},{})", pos.x, pos.y, pos.z);
+                }
+                ++cacheHitCount;
+                --evaluateDepth;
+                return false;
             }
         }
-    }).launch(ll::thread::ServerThreadExecutor::getDefault());
+
+        bool result = origin(system, pos);
+        getCache()[this] = CacheEntry{
+            .inputHash = currentHash,
+            .lastOutputStrength = this->getStrength(),
+            .lastUpdateTick = getCurrentTickID()
+        };
+        if (getConfig().debug) {
+            logger().debug("Cache miss at ({},{},{})", pos.x, pos.y, pos.z);
+        }
+        ++cacheMissCount;
+        --evaluateDepth;
+        return result;
+    } catch (const std::exception& e) {
+        logger().error("Exception in ConsumerComponentEvaluateHook at ({},{},{}): {}", pos.x, pos.y, pos.z, e.what());
+        --evaluateDepth;
+        return origin(system, pos);
+    } catch (...) {
+        logger().error("Unknown exception in ConsumerComponentEvaluateHook at ({},{},{})", pos.x, pos.y, pos.z);
+        --evaluateDepth;
+        return origin(system, pos);
+    }
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    CircuitSceneGraphRemoveComponentHook,
+    ll::memory::HookPriority::Normal,
+    CircuitSceneGraph,
+    &CircuitSceneGraph::removeComponent,
+    void,
+    BlockPos const& pos
+) {
+    if (getConfig().enabled) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto it = this->mAllComponents.find(pos);
+        if (it != this->mAllComponents.end()) {
+            getCache().erase(it->second.get());
+        }
+    }
+    origin(pos);
 }
 
 PluginImpl& PluginImpl::getInstance() {
@@ -105,40 +258,39 @@ bool PluginImpl::load() {
         logger().warn("Failed to load config, using default values and saving");
         saveConfig();
     }
-    logger().info("Plugin loaded. RandomTick optimization: {}, debug: {}",
-                  config.randomTick ? "enabled" : "disabled",
-                  config.debug ? "enabled" : "disabled");
+    logger().info("Plugin loaded. enabled: {}, debug: {}", config.enabled, config.debug);
     return true;
 }
 
 bool PluginImpl::enable() {
-    logger().info("enable() called, config.randomTick = {}", config.randomTick ? "true" : "false");
-    logger().info("enable() called, config.debug = {}", config.debug ? "true" : "false");
-
     if (!hookInstalled) {
-        RandomTickComponentOnTickHook::hook();
+        CircuitSceneGraphAddHook::hook();
+        ConsumerComponentEvaluateHook::hook();
+        CircuitSceneGraphRemoveComponentHook::hook();
         hookInstalled = true;
-        logger().debug("RandomTick hook installed");
+        logger().debug("Hooks installed");
     }
-
-    if (config.debug) {
-        startDebugTask();
-    }
+    if (config.debug) startDebugTask();
     logger().info("Plugin enabled");
     return true;
 }
 
 bool PluginImpl::disable() {
+    stopDebugTask();
     if (hookInstalled) {
-        RandomTickComponentOnTickHook::unhook();
+        CircuitSceneGraphAddHook::unhook();
+        ConsumerComponentEvaluateHook::unhook();
+        CircuitSceneGraphRemoveComponentHook::unhook();
         hookInstalled = false;
-        logger().debug("RandomTick hook uninstalled");
-    }
+        clearCache();
 
+        cacheHitCount = cacheMissCount = cacheSkipCount = 0;
+        logger().debug("Hooks uninstalled, cache cleared, counters reset");
+    }
     logger().info("Plugin disabled");
     return true;
 }
 
-} // namespace random_tick_optimizer
+} // namespace redstone_optimizer
 
-LL_REGISTER_MOD(random_tick_optimizer::PluginImpl, random_tick_optimizer::PluginImpl::getInstance());
+LL_REGISTER_MOD(redstone_optimizer::PluginImpl, redstone_optimizer::PluginImpl::getInstance());
