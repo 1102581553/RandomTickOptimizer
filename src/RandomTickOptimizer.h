@@ -8,18 +8,15 @@
 namespace random_tick_optimizer {
 
 struct Config {
-    int version = 1;
-    bool randomTick = false;  // 随机刻优化开关
-    bool debug = false;       // 调试开关，开启后每秒输出优化统计
+    int  version          = 1;
+    bool monitor          = true;
+    bool debug            = false;
+    int  statsIntervalSec = 5;
 };
 
-Config& getConfig();
-bool loadConfig();
-bool saveConfig();
-
-uint64_t getBlockedCount();
-void resetBlockedCount();
-
+Config&         getConfig();
+bool            loadConfig();
+bool            saveConfig();
 ll::io::Logger& logger();
 
 class PluginImpl {
