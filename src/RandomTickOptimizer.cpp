@@ -9,6 +9,7 @@
 #include "mc/world/level/block/Block.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/BlockPos.h"
+#include "mc/world/level/Level.h"
 #include "mc/util/Random.h"
 #include <filesystem>
 #include <unordered_map>
