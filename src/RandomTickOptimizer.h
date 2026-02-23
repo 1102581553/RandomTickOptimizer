@@ -9,9 +9,18 @@ namespace random_tick_optimizer {
 
 struct Config {
     int  version          = 1;
-    bool monitor          = true;
+    bool enabled          = true;
     bool debug            = false;
     int  statsIntervalSec = 5;
+
+    // 位置冷却
+    bool cooldownEnabled    = true;
+    int  cooldownGameTicks  = 10;
+    int  maxCooldownEntries = 1048576;
+
+    // 每 tick 预算上限
+    bool budgetEnabled  = true;
+    int  budgetPerTick  = 1024;
 };
 
 Config&         getConfig();
