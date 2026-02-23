@@ -13,11 +13,6 @@ struct Config {
     bool debug            = false;
     int  statsIntervalSec = 5;
 
-    // 位置冷却
-    bool cooldownEnabled    = true;
-    int  cooldownGameTicks  = 10;
-    int  maxCooldownEntries = 262144;
-
     // 每 tick 预算上限
     bool budgetEnabled  = true;
     int  budgetPerTick  = 1024;
