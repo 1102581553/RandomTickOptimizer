@@ -7,30 +7,29 @@
 #include "ll/api/io/Logger.h"
 #include "ll/api/io/LoggerRegistry.h"
 #include "mc/world/level/block/Block.h"
-#include "mc/world/level/block/components/BlockRandomTickingComponent.h"
-#include "mc/world/level/block/block_events/BlockRandomTickLegacyEvent.h"
 #include "mc/world/level/BlockSource.h"
+#include "mc/world/level/BlockPos.h"
+#include "mc/util/Random.h"
 #include <filesystem>
-#include <unordered_set>
-#include <chrono>
+#include <unordered_map>
+#include <mutex>
 #include <string>
+#include <chrono>
 
 namespace random_tick_optimizer {
 
-static Config config;
-static std::shared_ptr<ll::io::Logger> log;
-static std::atomic<uint64_t> blockedCount{0};
-static bool hookInstalled = false;
+static Config                                    config;
+static std::shared_ptr<ll::io::Logger>           log;
+static std::atomic<bool>                         pluginEnabled{false};
+static std::atomic<bool>                         hookInstalled{false};
+static std::atomic<uint64_t>                     totalTickCount{0};
 
-// 临时清空排除列表，用于观察所有随机刻
-static const std::unordered_set<std::string> EXCLUDED_BLOCK_NAMES = {
-    // 暂时不排除任何方块
-};
+static std::mutex                                statsMutex;
+static std::unordered_map<std::string, uint64_t> tickStats;
+
+// ── 工具函数 ──────────────────────────────────────────────
 
 Config& getConfig() { return config; }
-
-uint64_t getBlockedCount() { return blockedCount.load(std::memory_order_relaxed); }
-void resetBlockedCount() { blockedCount.store(0, std::memory_order_relaxed); }
 
 bool loadConfig() {
     auto path = PluginImpl::getInstance().getSelf().getConfigDir() / "config.json";
@@ -49,50 +48,57 @@ ll::io::Logger& logger() {
     return *log;
 }
 
-// 手动钩子：BlockRandomTickingComponent::onTick
+// ── Hook: Block::randomTick ──────────────────────────────
+// 原版方块的随机刻全部经过这里，而不是 BlockRandomTickingComponent
+
 LL_TYPE_INSTANCE_HOOK(
-    RandomTickComponentOnTickHook,
+    BlockRandomTickHook,
     ll::memory::HookPriority::Normal,
-    BlockRandomTickingComponent,
-    &BlockRandomTickingComponent::onTick,
+    Block,
+    &Block::randomTick,
     void,
-    ::BlockEvents::BlockRandomTickLegacyEvent const& eventData
+    ::BlockSource& region,
+    ::BlockPos const& pos,
+    ::Random& random
 ) {
-    // 无条件输出钩子触发信息，用于诊断
-    const BlockPos& pos = eventData.mPos;
-    BlockSource& region = eventData.mRegion;
-    const Block& block = region.getBlock(pos);
-    std::string blockName = block.getTypeName();
-
-    logger().debug("RandomTick hook triggered for {} at ({}, {}, {})",
-                   blockName, pos.x, pos.y, pos.z);
-
-    // 如果优化关闭，直接调用原函数
-    if (!getConfig().randomTick) {
-        origin(eventData);
-        return;
+    if (pluginEnabled.load(std::memory_order_relaxed) && config.monitor) {
+        std::string name = this->getTypeName();
+        totalTickCount.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(statsMutex);
+            tickStats[name]++;
+        }
     }
 
-    if (EXCLUDED_BLOCK_NAMES.contains(blockName)) {
-        blockedCount.fetch_add(1, std::memory_order_relaxed);
-        logger().debug(" -> Blocked (count now {})", getBlockedCount());
-        return; // 阻止随机刻
-    }
-
-    origin(eventData);
+    // 当前只监控，不拦截
+    origin(region, pos, random);
 }
 
-// 调试任务：每秒输出统计
-void startDebugTask() {
+// ── 统计输出协程 ──────────────────────────────────────────
+
+void startStatsTask() {
     ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
-        while (true) {
-            co_await std::chrono::seconds(1);
+        while (pluginEnabled.load(std::memory_order_relaxed)) {
+            int interval = getConfig().statsIntervalSec;
+            if (interval < 1) interval = 5;
+            co_await std::chrono::seconds(interval);
+
+            if (!pluginEnabled.load(std::memory_order_relaxed)) break;
+
             if (getConfig().debug) {
-                logger().info("RandomTick optimization stats: blocked {} random ticks", getBlockedCount());
+                std::lock_guard<std::mutex> lock(statsMutex);
+                uint64_t total = totalTickCount.load(std::memory_order_relaxed);
+                logger().info("=== RandomTick Stats (total: {}) ===", total);
+                for (const auto& [name, count] : tickStats) {
+                    logger().info("  {} : {}", name, count);
+                }
+                logger().info("=== End ===");
             }
         }
     }).launch(ll::thread::ServerThreadExecutor::getDefault());
 }
+
+// ── 生命周期 ──────────────────────────────────────────────
 
 PluginImpl& PluginImpl::getInstance() {
     static PluginImpl instance;
@@ -102,40 +108,43 @@ PluginImpl& PluginImpl::getInstance() {
 bool PluginImpl::load() {
     std::filesystem::create_directories(getSelf().getConfigDir());
     if (!loadConfig()) {
-        logger().warn("Failed to load config, using default values and saving");
+        logger().warn("Failed to load config, saving defaults");
         saveConfig();
     }
-    logger().info("Plugin loaded. RandomTick optimization: {}, debug: {}",
-                  config.randomTick ? "enabled" : "disabled",
-                  config.debug ? "enabled" : "disabled");
+    logger().info("Loaded. monitor={}, debug={}", config.monitor, config.debug);
     return true;
 }
 
 bool PluginImpl::enable() {
-    logger().info("enable() called, config.randomTick = {}", config.randomTick ? "true" : "false");
-    logger().info("enable() called, config.debug = {}", config.debug ? "true" : "false");
+    pluginEnabled.store(true, std::memory_order_relaxed);
 
-    if (!hookInstalled) {
-        RandomTickComponentOnTickHook::hook();
-        hookInstalled = true;
-        logger().debug("RandomTick hook installed");
+    {
+        std::lock_guard<std::mutex> lock(statsMutex);
+        tickStats.clear();
+    }
+    totalTickCount.store(0, std::memory_order_relaxed);
+
+    if (!hookInstalled.load(std::memory_order_relaxed)) {
+        BlockRandomTickHook::hook();
+        hookInstalled.store(true, std::memory_order_relaxed);
+        logger().info("Block::randomTick hook installed");
     }
 
-    if (config.debug) {
-        startDebugTask();
-    }
-    logger().info("Plugin enabled");
+    startStatsTask();
+    logger().info("Enabled. monitor={}, debug={}", config.monitor, config.debug);
     return true;
 }
 
 bool PluginImpl::disable() {
-    if (hookInstalled) {
-        RandomTickComponentOnTickHook::unhook();
-        hookInstalled = false;
-        logger().debug("RandomTick hook uninstalled");
+    pluginEnabled.store(false, std::memory_order_relaxed);
+
+    if (hookInstalled.load(std::memory_order_relaxed)) {
+        BlockRandomTickHook::unhook();
+        hookInstalled.store(false, std::memory_order_relaxed);
+        logger().info("Hook uninstalled");
     }
 
-    logger().info("Plugin disabled");
+    logger().info("Disabled");
     return true;
 }
 
