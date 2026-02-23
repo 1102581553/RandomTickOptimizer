@@ -12,20 +12,42 @@
 #include "mc/util/Random.h"
 #include <filesystem>
 #include <unordered_map>
-#include <mutex>
 #include <string>
 #include <chrono>
 
 namespace random_tick_optimizer {
 
-static Config                                    config;
-static std::shared_ptr<ll::io::Logger>           log;
-static std::atomic<bool>                         pluginEnabled{false};
-static std::atomic<bool>                         hookInstalled{false};
-static std::atomic<uint64_t>                     totalTickCount{0};
+static Config                          config;
+static std::shared_ptr<ll::io::Logger> log;
+static std::atomic<bool>               pluginEnabled{false};
+static std::atomic<bool>               hookInstalled{false};
 
-static std::mutex                                statsMutex;
+// ── 统计 ──
+static uint64_t totalTickCount{0};
+static uint64_t skippedByCooldown{0};
+static uint64_t skippedByBudget{0};
+static uint64_t processedCount{0};
 static std::unordered_map<std::string, uint64_t> tickStats;
+
+// ── 预算 ──
+static uint64_t lastGameTick{0};
+static int      budgetRemaining{0};
+
+// ── 位置冷却 ──
+struct PosHash {
+    size_t operator()(const BlockPos& p) const {
+        return static_cast<size_t>(p.x) * 73856093ULL
+             ^ static_cast<size_t>(p.y) * 19349663ULL
+             ^ static_cast<size_t>(p.z) * 83492791ULL;
+    }
+};
+struct PosEqual {
+    bool operator()(const BlockPos& a, const BlockPos& b) const {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    }
+};
+static std::unordered_map<BlockPos, uint64_t, PosHash, PosEqual> cooldownMap;
+static uint64_t lastCooldownCleanTick{0};
 
 // ── 工具函数 ──────────────────────────────────────────────
 
@@ -48,8 +70,22 @@ ll::io::Logger& logger() {
     return *log;
 }
 
-// ── Hook: Block::randomTick ──────────────────────────────
-// 原版方块的随机刻全部经过这里，而不是 BlockRandomTickingComponent
+static void cleanupCooldownMap(uint64_t currentGameTick) {
+    if (currentGameTick - lastCooldownCleanTick < 100) return;
+    lastCooldownCleanTick = currentGameTick;
+
+    uint64_t threshold = static_cast<uint64_t>(config.cooldownGameTicks);
+    auto it = cooldownMap.begin();
+    while (it != cooldownMap.end()) {
+        if (currentGameTick - it->second > threshold) {
+            it = cooldownMap.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// ── Hook ──────────────────────────────────────────────────
 
 LL_TYPE_INSTANCE_HOOK(
     BlockRandomTickHook,
@@ -61,16 +97,53 @@ LL_TYPE_INSTANCE_HOOK(
     ::BlockPos const& pos,
     ::Random& random
 ) {
-    if (pluginEnabled.load(std::memory_order_relaxed) && config.monitor) {
-        std::string name = this->getTypeName();
-        totalTickCount.fetch_add(1, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> lock(statsMutex);
-            tickStats[name]++;
+    if (!pluginEnabled.load(std::memory_order_relaxed) || !config.enabled) {
+        origin(region, pos, random);
+        return;
+    }
+
+    totalTickCount++;
+
+    uint64_t currentGameTick = region.getLevel().getCurrentTick().tickID;
+
+    // ── 1. 每 tick 预算 ──
+    if (config.budgetEnabled) {
+        if (currentGameTick != lastGameTick) {
+            lastGameTick = currentGameTick;
+            budgetRemaining = config.budgetPerTick;
+        }
+        if (budgetRemaining <= 0) {
+            skippedByBudget++;
+            return;
+        }
+        budgetRemaining--;
+    }
+
+    // ── 2. 位置冷却 ──
+    if (config.cooldownEnabled && config.cooldownGameTicks > 0) {
+        cleanupCooldownMap(currentGameTick);
+
+        auto it = cooldownMap.find(pos);
+        if (it != cooldownMap.end()) {
+            if (currentGameTick - it->second
+                < static_cast<uint64_t>(config.cooldownGameTicks)) {
+                skippedByCooldown++;
+                return;
+            }
+            it->second = currentGameTick;
+        } else {
+            if (static_cast<int>(cooldownMap.size()) >= config.maxCooldownEntries) {
+                cooldownMap.clear();
+            }
+            cooldownMap[pos] = currentGameTick;
         }
     }
 
-    // 当前只监控，不拦截
+    if (config.debug) {
+        tickStats[this->getTypeName()]++;
+    }
+
+    processedCount++;
     origin(region, pos, random);
 }
 
@@ -86,9 +159,19 @@ void startStatsTask() {
             if (!pluginEnabled.load(std::memory_order_relaxed)) break;
 
             if (getConfig().debug) {
-                std::lock_guard<std::mutex> lock(statsMutex);
-                uint64_t total = totalTickCount.load(std::memory_order_relaxed);
-                logger().info("=== RandomTick Stats (total: {}) ===", total);
+                uint64_t skipped = skippedByCooldown + skippedByBudget;
+                float skipPct = totalTickCount > 0
+                    ? static_cast<float>(skipped)
+                      / static_cast<float>(totalTickCount) * 100.0f
+                    : 0.0f;
+
+                logger().info("=== RandomTick Stats ===");
+                logger().info("  total: {} | processed: {} | skipped: {:.1f}%",
+                              totalTickCount, processedCount, skipPct);
+                logger().info("  cooldown: {} | budget: {}",
+                              skippedByCooldown, skippedByBudget);
+                logger().info("  cooldown map: {}", cooldownMap.size());
+
                 for (const auto& [name, count] : tickStats) {
                     logger().info("  {} : {}", name, count);
                 }
@@ -111,27 +194,35 @@ bool PluginImpl::load() {
         logger().warn("Failed to load config, saving defaults");
         saveConfig();
     }
-    logger().info("Loaded. monitor={}, debug={}", config.monitor, config.debug);
+    logger().info("Loaded. cooldown={}({}t), budget={}({})",
+                  config.cooldownEnabled, config.cooldownGameTicks,
+                  config.budgetEnabled, config.budgetPerTick);
     return true;
 }
 
 bool PluginImpl::enable() {
     pluginEnabled.store(true, std::memory_order_relaxed);
 
-    {
-        std::lock_guard<std::mutex> lock(statsMutex);
-        tickStats.clear();
-    }
-    totalTickCount.store(0, std::memory_order_relaxed);
+    totalTickCount    = 0;
+    skippedByCooldown = 0;
+    skippedByBudget   = 0;
+    processedCount    = 0;
+    tickStats.clear();
+    cooldownMap.clear();
+    lastGameTick          = 0;
+    lastCooldownCleanTick = 0;
+    budgetRemaining       = config.budgetPerTick;
 
     if (!hookInstalled.load(std::memory_order_relaxed)) {
         BlockRandomTickHook::hook();
         hookInstalled.store(true, std::memory_order_relaxed);
-        logger().info("Block::randomTick hook installed");
+        logger().info("Hook installed");
     }
 
     startStatsTask();
-    logger().info("Enabled. monitor={}, debug={}", config.monitor, config.debug);
+    logger().info("Enabled. cooldown={}({}t), budget={}({})",
+                  config.cooldownEnabled, config.cooldownGameTicks,
+                  config.budgetEnabled, config.budgetPerTick);
     return true;
 }
 
