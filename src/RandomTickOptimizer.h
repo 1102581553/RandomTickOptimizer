@@ -16,7 +16,7 @@ struct Config {
     // 位置冷却
     bool cooldownEnabled    = true;
     int  cooldownGameTicks  = 10;
-    int  maxCooldownEntries = 1048576;
+    int  cooldownTablePower = 20;   // 表大小 = 2^N，20 = 1048576 槽，约 24MB
 
     // 每 tick 预算上限
     bool budgetEnabled  = true;
