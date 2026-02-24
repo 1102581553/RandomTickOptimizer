@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <chrono>
 #include <atomic>
+#include <algorithm>
 
 namespace random_tick_optimizer {
 
@@ -25,8 +26,9 @@ static std::atomic<uint64_t> skippedByBudget{0};
 static std::atomic<uint64_t> processedCount{0};
 
 // 预算
-static uint64_t          lastGameTick{0};
-static std::atomic<int>  budgetRemaining{0};
+static uint64_t         lastGameTick{0};
+static std::atomic<int> budgetRemaining{0};
+static int              dynBudgetPerTick{20};
 
 // ── 工具函数 ──────────────────────────────────────────────
 
@@ -70,7 +72,7 @@ LL_TYPE_INSTANCE_HOOK(
         uint64_t currentTick = region.getLevel().getCurrentTick().tickID;
         if (currentTick != lastGameTick) {
             lastGameTick = currentTick;
-            budgetRemaining.store(config.budgetPerTick, std::memory_order_relaxed);
+            budgetRemaining.store(dynBudgetPerTick, std::memory_order_relaxed);
         }
 
         if (budgetRemaining.fetch_sub(1, std::memory_order_relaxed) <= 0) {
@@ -81,6 +83,32 @@ LL_TYPE_INSTANCE_HOOK(
 
     processedCount.fetch_add(1, std::memory_order_relaxed);
     origin(region);
+}
+
+// ── Level::tick Hook：测量耗时并动态调整预算 ─────────────
+LL_TYPE_INSTANCE_HOOK(
+    LevelTickHook,
+    ll::memory::HookPriority::Normal,
+    Level,
+    &Level::$tick,
+    void
+) {
+    auto tickStart = std::chrono::steady_clock::now();
+    origin();
+
+    if (!pluginEnabled.load(std::memory_order_relaxed) || !config.enabled || !config.budgetEnabled) {
+        return;
+    }
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tickStart
+    ).count();
+
+    if (elapsed > config.targetTickMs) {
+        dynBudgetPerTick = std::max(1, dynBudgetPerTick - config.budgetStep);
+    } else {
+        dynBudgetPerTick += config.budgetStep;
+    }
 }
 
 // ── 统计输出协程 ──────────────────────────────────────────
@@ -95,19 +123,18 @@ void startStatsTask() {
             if (!pluginEnabled.load(std::memory_order_relaxed)) break;
 
             if (getConfig().debug) {
-                uint64_t total   = totalTickCount.load(std::memory_order_relaxed);
-                uint64_t skipped = skippedByBudget.load(std::memory_order_relaxed);
+                uint64_t total     = totalTickCount.load(std::memory_order_relaxed);
+                uint64_t skipped   = skippedByBudget.load(std::memory_order_relaxed);
                 uint64_t processed = processedCount.load(std::memory_order_relaxed);
                 float skipPct = total > 0
                     ? static_cast<float>(skipped) / static_cast<float>(total) * 100.0f
                     : 0.0f;
 
                 logger().info(
-                    "ChunkTickBlocks | total: {} | processed: {} | budget skipped: {} ({:.1f}%)",
-                    total, processed, skipped, skipPct
+                    "ChunkTickBlocks | dynBudget={} | total={} | processed={} | skipped={} ({:.1f}%)",
+                    dynBudgetPerTick, total, processed, skipped, skipPct
                 );
 
-                // 重置统计
                 totalTickCount.store(0, std::memory_order_relaxed);
                 skippedByBudget.store(0, std::memory_order_relaxed);
                 processedCount.store(0, std::memory_order_relaxed);
@@ -129,27 +156,31 @@ bool PluginImpl::load() {
         logger().warn("Failed to load config, saving defaults");
         saveConfig();
     }
-    logger().info("Loaded. budget={}({})", config.budgetEnabled, config.budgetPerTick);
+    logger().info("Loaded. budgetEnabled={}, targetTickMs={}, budgetStep={}",
+        config.budgetEnabled, config.targetTickMs, config.budgetStep);
     return true;
 }
 
 bool PluginImpl::enable() {
     pluginEnabled.store(true, std::memory_order_relaxed);
 
+    dynBudgetPerTick = config.budgetStep * 10;
+
     totalTickCount.store(0, std::memory_order_relaxed);
     skippedByBudget.store(0, std::memory_order_relaxed);
     processedCount.store(0, std::memory_order_relaxed);
-    lastGameTick    = 0;
-    budgetRemaining.store(config.budgetPerTick, std::memory_order_relaxed);
+    lastGameTick = 0;
+    budgetRemaining.store(dynBudgetPerTick, std::memory_order_relaxed);
 
     if (!hookInstalled.load(std::memory_order_relaxed)) {
         ChunkTickBlocksHook::hook();
+        LevelTickHook::hook();
         hookInstalled.store(true, std::memory_order_relaxed);
-        logger().info("Hook installed on LevelChunk::tickBlocks");
+        logger().info("Hooks installed");
     }
 
     startStatsTask();
-    logger().info("Enabled. budget={}({})", config.budgetEnabled, config.budgetPerTick);
+    logger().info("Enabled. initBudget={}, targetTickMs={}", dynBudgetPerTick, config.targetTickMs);
     return true;
 }
 
@@ -158,8 +189,9 @@ bool PluginImpl::disable() {
 
     if (hookInstalled.load(std::memory_order_relaxed)) {
         ChunkTickBlocksHook::unhook();
+        LevelTickHook::unhook();
         hookInstalled.store(false, std::memory_order_relaxed);
-        logger().info("Hook uninstalled");
+        logger().info("Hooks uninstalled");
     }
 
     logger().info("Disabled");
