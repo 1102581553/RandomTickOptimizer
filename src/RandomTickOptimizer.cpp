@@ -1,267 +1,210 @@
-#include "Optimizer.h"
-#include <ll/api/memory/Hook.h>
-#include <ll/api/mod/RegisterHelper.h>
-#include <ll/api/io/Logger.h>
-#include <ll/api/io/LoggerRegistry.h>
-#include <ll/api/coro/CoroTask.h>
-#include <ll/api/thread/ServerThreadExecutor.h>
-#include <mc/world/actor/Mob.h>
-#include <mc/world/actor/Actor.h>
-#include <mc/world/level/Level.h>
-#include <mc/world/level/Tick.h>
-#include <mc/legacy/ActorUniqueID.h>
+#include "RandomTickOptimizer.h"
+#include "ll/api/memory/Hook.h"
+#include "ll/api/mod/RegisterHelper.h"
+#include "ll/api/coro/CoroTask.h"
+#include "ll/api/thread/ServerThreadExecutor.h"
+#include "ll/api/io/Logger.h"
+#include "ll/api/io/LoggerRegistry.h"
+#include "mc/world/level/BlockSource.h"
+#include "mc/world/level/Level.h"
+#include "mc/world/level/chunk/LevelChunk.h"
 #include <filesystem>
 #include <chrono>
+#include <atomic>
 #include <algorithm>
 
-namespace mob_ai_optimizer {
+namespace random_tick_optimizer {
 
-// ── 全局变量 ──────────────────────────────────────────────
-static Config config;
+static Config                          config;
 static std::shared_ptr<ll::io::Logger> log;
-static bool debugTaskRunning = false;
+static std::atomic<bool>               pluginEnabled{false};
+static std::atomic<bool>               hookInstalled{false};
 
-std::unordered_map<ActorUniqueID, std::uint64_t> lastAiTick;
-int           processedThisTick = 0;
-std::uint64_t lastTickId        = 0;
-int           cleanupCounter    = 0;
+// 统计
+static std::atomic<uint64_t> totalTickCount{0};
+static std::atomic<uint64_t> skippedByBudget{0};
+static std::atomic<uint64_t> processedCount{0};
 
-// 动态参数
-static int dynMaxPerTick    = 40;
-static int dynCooldownTicks = 4;
+// 预算
+static uint64_t         lastGameTick{0};
+static std::atomic<int> budgetRemaining{0};
+static int              dynBudgetPerTick{20};
 
-// 调试统计
-static size_t totalProcessed        = 0;
-static size_t totalCooldownSkipped  = 0;
-static size_t totalThrottleSkipped  = 0;
-static size_t totalDespawnCleaned   = 0;
-static size_t totalExpiredCleaned   = 0;
+// ── 工具函数 ──────────────────────────────────────────────
 
-// ── Logger ────────────────────────────────────────────────
-static ll::io::Logger& getLogger() {
+Config& getConfig() { return config; }
+
+bool loadConfig() {
+    auto path = PluginImpl::getInstance().getSelf().getConfigDir() / "config.json";
+    return ll::config::loadConfig(config, path);
+}
+
+bool saveConfig() {
+    auto path = PluginImpl::getInstance().getSelf().getConfigDir() / "config.json";
+    return ll::config::saveConfig(config, path);
+}
+
+ll::io::Logger& logger() {
     if (!log) {
-        log = ll::io::LoggerRegistry::getInstance().getOrCreate("MobAIOptimizer");
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("RandomTickOptimizer");
     }
     return *log;
 }
 
-// ── Config ────────────────────────────────────────────────
-Config& getConfig() { return config; }
+// ── Hook ──────────────────────────────────────────────────
 
-bool loadConfig() {
-    auto path   = Optimizer::getInstance().getSelf().getConfigDir() / "config.json";
-    bool loaded = ll::config::loadConfig(config, path);
-    if (config.cleanupIntervalTicks < 1)  config.cleanupIntervalTicks = 100;
-    if (config.maxExpiredAge        < 1)  config.maxExpiredAge        = 600;
-    if (config.initialMapReserve   == 0)  config.initialMapReserve    = 1000;
-    if (config.maxPerTickStep       < 1)  config.maxPerTickStep       = 1;
-    if (config.cooldownTicksStep    < 1)  config.cooldownTicksStep    = 1;
-    if (config.targetTickMs         < 1)  config.targetTickMs         = 50;
-    return loaded;
-}
-
-bool saveConfig() {
-    auto path = Optimizer::getInstance().getSelf().getConfigDir() / "config.json";
-    return ll::config::saveConfig(config, path);
-}
-
-// ── Debug ─────────────────────────────────────────────────
-static void resetStats() {
-    totalProcessed = totalCooldownSkipped = totalThrottleSkipped = 0;
-    totalDespawnCleaned = totalExpiredCleaned = 0;
-}
-
-static void startDebugTask() {
-    if (debugTaskRunning) return;
-    debugTaskRunning = true;
-
-    ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
-        while (debugTaskRunning) {
-            co_await std::chrono::seconds(5);
-            ll::thread::ServerThreadExecutor::getDefault().execute([] {
-                if (!config.debug) return;
-                size_t total = totalProcessed + totalCooldownSkipped + totalThrottleSkipped;
-                double skipRate = total > 0
-                    ? (100.0 * (totalCooldownSkipped + totalThrottleSkipped) / total)
-                    : 0.0;
-                getLogger().info(
-                    "AI stats (5s): dynMaxPerTick={}, dynCooldown={} | "
-                    "processed={}, cooldownSkip={}, throttleSkip={}, "
-                    "skipRate={:.1f}%, despawnClean={}, expiredClean={}, tracked={}",
-                    dynMaxPerTick, dynCooldownTicks,
-                    totalProcessed, totalCooldownSkipped, totalThrottleSkipped,
-                    skipRate, totalDespawnCleaned, totalExpiredCleaned,
-                    lastAiTick.size()
-                );
-                resetStats();
-            });
-        }
-        debugTaskRunning = false;
-    }).launch(ll::thread::ServerThreadExecutor::getDefault());
-}
-
-static void stopDebugTask() { debugTaskRunning = false; }
-
-// ── 插件生命周期 ──────────────────────────────────────────
-Optimizer& Optimizer::getInstance() {
-    static Optimizer instance;
-    return instance;
-}
-
-bool Optimizer::load() {
-    std::filesystem::create_directories(getSelf().getConfigDir());
-    if (!loadConfig()) {
-        getLogger().warn("Failed to load config, using defaults and saving");
-        saveConfig();
-    }
-    lastAiTick.reserve(config.initialMapReserve);
-    getLogger().info(
-        "Loaded. enabled={}, debug={}, targetTickMs={}, maxPerTickStep={}, cooldownTicksStep={}",
-        config.enabled, config.debug,
-        config.targetTickMs, config.maxPerTickStep, config.cooldownTicksStep
-    );
-    return true;
-}
-
-bool Optimizer::enable() {
-    dynMaxPerTick    = config.maxPerTickStep    * 10;
-    dynCooldownTicks = config.cooldownTicksStep * 4;
-
-    if (config.debug) startDebugTask();
-    getLogger().info(
-        "Enabled. initMaxPerTick={}, initCooldown={}",
-        dynMaxPerTick, dynCooldownTicks
-    );
-    return true;
-}
-
-bool Optimizer::disable() {
-    stopDebugTask();
-    lastAiTick.clear();
-    processedThisTick = 0;
-    lastTickId        = 0;
-    cleanupCounter    = 0;
-    resetStats();
-    getLogger().info("Disabled");
-    return true;
-}
-
-} // namespace mob_ai_optimizer
-
-// ── AI 优化 Hook ──────────────────────────────────────────
-LL_AUTO_TYPE_INSTANCE_HOOK(
-    MobAiStepHook,
+LL_TYPE_INSTANCE_HOOK(
+    ChunkTickBlocksHook,
     ll::memory::HookPriority::Normal,
-    Mob,
-    &Mob::$aiStep,
-    void
+    LevelChunk,
+    &LevelChunk::tickBlocks,
+    void,
+    ::BlockSource& region
 ) {
-    using namespace mob_ai_optimizer;
-
-    if (!config.enabled) {
-        origin();
+    if (!pluginEnabled.load(std::memory_order_relaxed) || !config.enabled) {
+        origin(region);
         return;
     }
 
-    std::uint64_t currentTick = this->getLevel().getCurrentServerTick().tickID;
+    totalTickCount.fetch_add(1, std::memory_order_relaxed);
 
-    if (currentTick != lastTickId) {
-        lastTickId        = currentTick;
-        processedThisTick = 0;
+    if (config.budgetEnabled) {
+        uint64_t currentTick = region.getLevel().getCurrentTick().tickID;
+        if (currentTick != lastGameTick) {
+            lastGameTick = currentTick;
+            budgetRemaining.store(dynBudgetPerTick, std::memory_order_relaxed);
+        }
 
-        if (++cleanupCounter >= config.cleanupIntervalTicks) {
-            cleanupCounter = 0;
-            for (auto it = lastAiTick.begin(); it != lastAiTick.end();) {
-                if (currentTick - it->second >
-                    static_cast<std::uint64_t>(config.maxExpiredAge))
-                {
-                    it = lastAiTick.erase(it);
-                    ++totalExpiredCleaned;
-                } else {
-                    ++it;
-                }
-            }
+        if (budgetRemaining.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+            skippedByBudget.fetch_add(1, std::memory_order_relaxed);
+            return;
         }
     }
 
-    if (processedThisTick >= dynMaxPerTick) {
-        ++totalThrottleSkipped;
-        return;
-    }
-
-    auto [it, inserted] = lastAiTick.emplace(this->getOrCreateUniqueID(), 0);
-    if (!inserted &&
-        currentTick - it->second <
-            static_cast<std::uint64_t>(dynCooldownTicks))
-    {
-        ++totalCooldownSkipped;
-        return;
-    }
-
-    ++processedThisTick;
-    origin();
-    it->second = currentTick;
-    ++totalProcessed;
+    processedCount.fetch_add(1, std::memory_order_relaxed);
+    origin(region);
 }
 
-// ── Level::tick Hook：测耗时动态调整 ─────────────────────
-LL_AUTO_TYPE_INSTANCE_HOOK(
+// ── Level::tick Hook：测耗时动态调整预算 ─────────────────
+LL_TYPE_INSTANCE_HOOK(
     LevelTickHook,
     ll::memory::HookPriority::Normal,
     Level,
     &Level::$tick,
     void
 ) {
-    using namespace mob_ai_optimizer;
-
     auto tickStart = std::chrono::steady_clock::now();
     origin();
 
-    if (!config.enabled) return;
+    if (!pluginEnabled.load(std::memory_order_relaxed) ||
+        !config.enabled ||
+        !config.budgetEnabled) {
+        return;
+    }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - tickStart
     ).count();
 
     if (elapsed > config.targetTickMs) {
-        dynMaxPerTick    = std::max(16, dynMaxPerTick    - config.maxPerTickStep);
-        dynCooldownTicks = std::max(1,  dynCooldownTicks + config.cooldownTicksStep);
+        dynBudgetPerTick = std::max(1, dynBudgetPerTick - config.budgetStep);
     } else {
-        dynMaxPerTick    += config.maxPerTickStep;
-        dynCooldownTicks  = std::max(1, dynCooldownTicks - config.cooldownTicksStep);
+        dynBudgetPerTick += config.budgetStep;
     }
 }
 
-// ── 自动清理 Hook ─────────────────────────────────────────
-LL_AUTO_TYPE_INSTANCE_HOOK(
-    ActorDespawnHook,
-    ll::memory::HookPriority::Normal,
-    Actor,
-    &Actor::$despawn,
-    void
-) {
-    using namespace mob_ai_optimizer;
-    if (config.enabled) {
-        lastAiTick.erase(this->getOrCreateUniqueID());
-        ++totalDespawnCleaned;
-    }
-    origin();
+// ── 统计输出协程 ──────────────────────────────────────────
+
+void startStatsTask() {
+    ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
+        while (pluginEnabled.load(std::memory_order_relaxed)) {
+            int interval = getConfig().statsIntervalSec;
+            if (interval < 1) interval = 5;
+            co_await std::chrono::seconds(interval);
+
+            if (!pluginEnabled.load(std::memory_order_relaxed)) break;
+
+            if (getConfig().debug) {
+                uint64_t total     = totalTickCount.load(std::memory_order_relaxed);
+                uint64_t skipped   = skippedByBudget.load(std::memory_order_relaxed);
+                uint64_t processed = processedCount.load(std::memory_order_relaxed);
+                float skipPct = total > 0
+                    ? static_cast<float>(skipped) / static_cast<float>(total) * 100.0f
+                    : 0.0f;
+
+                logger().info(
+                    "ChunkTickBlocks | dynBudget={} | total={} | processed={} | skipped={} ({:.1f}%)",
+                    dynBudgetPerTick, total, processed, skipped, skipPct
+                );
+
+                totalTickCount.store(0, std::memory_order_relaxed);
+                skippedByBudget.store(0, std::memory_order_relaxed);
+                processedCount.store(0, std::memory_order_relaxed);
+            }
+        }
+    }).launch(ll::thread::ServerThreadExecutor::getDefault());
 }
 
-LL_AUTO_TYPE_INSTANCE_HOOK(
-    ActorRemoveHook,
-    ll::memory::HookPriority::Normal,
-    Actor,
-    &Actor::$remove,
-    void
-) {
-    using namespace mob_ai_optimizer;
-    if (config.enabled) {
-        lastAiTick.erase(this->getOrCreateUniqueID());
-        ++totalDespawnCleaned;
-    }
-    origin();
+// ── 生命周期 ──────────────────────────────────────────────
+
+PluginImpl& PluginImpl::getInstance() {
+    static PluginImpl instance;
+    return instance;
 }
 
-// ── 注册插件 ──────────────────────────────────────────────
-LL_REGISTER_MOD(mob_ai_optimizer::Optimizer, mob_ai_optimizer::Optimizer::getInstance());
+bool PluginImpl::load() {
+    std::filesystem::create_directories(getSelf().getConfigDir());
+    if (!loadConfig()) {
+        logger().warn("Failed to load config, saving defaults");
+        saveConfig();
+    }
+    logger().info(
+        "Loaded. budgetEnabled={}, targetTickMs={}, budgetStep={}",
+        config.budgetEnabled, config.targetTickMs, config.budgetStep
+    );
+    return true;
+}
+
+bool PluginImpl::enable() {
+    pluginEnabled.store(true, std::memory_order_relaxed);
+
+    dynBudgetPerTick = config.budgetStep * 10;
+
+    totalTickCount.store(0, std::memory_order_relaxed);
+    skippedByBudget.store(0, std::memory_order_relaxed);
+    processedCount.store(0, std::memory_order_relaxed);
+    lastGameTick = 0;
+    budgetRemaining.store(dynBudgetPerTick, std::memory_order_relaxed);
+
+    if (!hookInstalled.load(std::memory_order_relaxed)) {
+        ChunkTickBlocksHook::hook();
+        LevelTickHook::hook();
+        hookInstalled.store(true, std::memory_order_relaxed);
+        logger().info("Hooks installed");
+    }
+
+    startStatsTask();
+    logger().info(
+        "Enabled. initBudget={}, targetTickMs={}",
+        dynBudgetPerTick, config.targetTickMs
+    );
+    return true;
+}
+
+bool PluginImpl::disable() {
+    pluginEnabled.store(false, std::memory_order_relaxed);
+
+    if (hookInstalled.load(std::memory_order_relaxed)) {
+        ChunkTickBlocksHook::unhook();
+        LevelTickHook::unhook();
+        hookInstalled.store(false, std::memory_order_relaxed);
+        logger().info("Hooks uninstalled");
+    }
+
+    logger().info("Disabled");
+    return true;
+}
+
+} // namespace random_tick_optimizer
+
+LL_REGISTER_MOD(random_tick_optimizer::PluginImpl, random_tick_optimizer::PluginImpl::getInstance());
