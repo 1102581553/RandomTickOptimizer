@@ -8,14 +8,13 @@
 namespace random_tick_optimizer {
 
 struct Config {
-    int  version          = 1;
+    int  version          = 2;
     bool enabled          = true;
     bool debug            = false;
     int  statsIntervalSec = 5;
 
-    // 每 tick 预算上限
-    bool budgetEnabled  = true;
-    int  budgetPerTick  = 1024;
+    bool budgetEnabled = true;
+    int  budgetPerTick = 20; // 每tick最多执行N次tickBlocks
 };
 
 Config&         getConfig();
