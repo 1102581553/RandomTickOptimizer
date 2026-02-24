@@ -13,9 +13,9 @@ struct Config {
     bool debug            = false;
     int  statsIntervalSec = 5;
 
-    bool budgetEnabled  = true;
-    int  targetTickMs   = 40;
-    int  budgetStep     = 2;   // 每 tick 调整步长
+    bool budgetEnabled = true;
+    int  targetTickMs  = 50;
+    int  budgetStep    = 2;
 };
 
 Config&         getConfig();
