@@ -3,17 +3,14 @@
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/coro/CoroTask.h"
 #include "ll/api/thread/ServerThreadExecutor.h"
-#include "ll/api/chrono/GameChrono.h"
 #include "ll/api/io/Logger.h"
 #include "ll/api/io/LoggerRegistry.h"
-#include "mc/world/level/block/Block.h"
 #include "mc/world/level/BlockSource.h"
-#include "mc/world/level/BlockPos.h"
 #include "mc/world/level/Level.h"
-#include "mc/util/Random.h"
+#include "mc/world/level/chunk/LevelChunk.h"
 #include <filesystem>
-#include <string>
 #include <chrono>
+#include <atomic>
 
 namespace random_tick_optimizer {
 
@@ -22,14 +19,14 @@ static std::shared_ptr<ll::io::Logger> log;
 static std::atomic<bool>               pluginEnabled{false};
 static std::atomic<bool>               hookInstalled{false};
 
-// ── 统计 ──
-static uint64_t totalTickCount{0};
-static uint64_t skippedByBudget{0};
-static uint64_t processedCount{0};
+// 统计
+static std::atomic<uint64_t> totalTickCount{0};
+static std::atomic<uint64_t> skippedByBudget{0};
+static std::atomic<uint64_t> processedCount{0};
 
-// ── 预算 ──
-static uint64_t lastGameTick{0};
-static int      budgetRemaining{0};
+// 预算
+static uint64_t          lastGameTick{0};
+static std::atomic<int>  budgetRemaining{0};
 
 // ── 工具函数 ──────────────────────────────────────────────
 
@@ -55,37 +52,35 @@ ll::io::Logger& logger() {
 // ── Hook ──────────────────────────────────────────────────
 
 LL_TYPE_INSTANCE_HOOK(
-    BlockRandomTickHook,
+    ChunkTickBlocksHook,
     ll::memory::HookPriority::Normal,
-    Block,
-    &Block::randomTick,
+    LevelChunk,
+    &LevelChunk::tickBlocks,
     void,
-    ::BlockSource& region,
-    ::BlockPos const& pos,
-    ::Random& random
+    ::BlockSource& region
 ) {
     if (!pluginEnabled.load(std::memory_order_relaxed) || !config.enabled) {
-        origin(region, pos, random);
+        origin(region);
         return;
     }
 
-    totalTickCount++;
+    totalTickCount.fetch_add(1, std::memory_order_relaxed);
 
     if (config.budgetEnabled) {
-        uint64_t currentGameTick = region.getLevel().getCurrentTick().tickID;
-        if (currentGameTick != lastGameTick) {
-            lastGameTick = currentGameTick;
-            budgetRemaining = config.budgetPerTick;
+        uint64_t currentTick = region.getLevel().getCurrentTick().tickID;
+        if (currentTick != lastGameTick) {
+            lastGameTick = currentTick;
+            budgetRemaining.store(config.budgetPerTick, std::memory_order_relaxed);
         }
-        if (budgetRemaining <= 0) {
-            skippedByBudget++;
+
+        if (budgetRemaining.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+            skippedByBudget.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        budgetRemaining--;
     }
 
-    processedCount++;
-    origin(region, pos, random);
+    processedCount.fetch_add(1, std::memory_order_relaxed);
+    origin(region);
 }
 
 // ── 统计输出协程 ──────────────────────────────────────────
@@ -100,13 +95,22 @@ void startStatsTask() {
             if (!pluginEnabled.load(std::memory_order_relaxed)) break;
 
             if (getConfig().debug) {
-                float skipPct = totalTickCount > 0
-                    ? static_cast<float>(skippedByBudget)
-                      / static_cast<float>(totalTickCount) * 100.0f
+                uint64_t total   = totalTickCount.load(std::memory_order_relaxed);
+                uint64_t skipped = skippedByBudget.load(std::memory_order_relaxed);
+                uint64_t processed = processedCount.load(std::memory_order_relaxed);
+                float skipPct = total > 0
+                    ? static_cast<float>(skipped) / static_cast<float>(total) * 100.0f
                     : 0.0f;
 
-                logger().info("RandomTick | total: {} | processed: {} | budget skipped: {} ({:.1f}%)",
-                              totalTickCount, processedCount, skippedByBudget, skipPct);
+                logger().info(
+                    "ChunkTickBlocks | total: {} | processed: {} | budget skipped: {} ({:.1f}%)",
+                    total, processed, skipped, skipPct
+                );
+
+                // 重置统计
+                totalTickCount.store(0, std::memory_order_relaxed);
+                skippedByBudget.store(0, std::memory_order_relaxed);
+                processedCount.store(0, std::memory_order_relaxed);
             }
         }
     }).launch(ll::thread::ServerThreadExecutor::getDefault());
@@ -132,16 +136,16 @@ bool PluginImpl::load() {
 bool PluginImpl::enable() {
     pluginEnabled.store(true, std::memory_order_relaxed);
 
-    totalTickCount  = 0;
-    skippedByBudget = 0;
-    processedCount  = 0;
+    totalTickCount.store(0, std::memory_order_relaxed);
+    skippedByBudget.store(0, std::memory_order_relaxed);
+    processedCount.store(0, std::memory_order_relaxed);
     lastGameTick    = 0;
-    budgetRemaining = config.budgetPerTick;
+    budgetRemaining.store(config.budgetPerTick, std::memory_order_relaxed);
 
     if (!hookInstalled.load(std::memory_order_relaxed)) {
-        BlockRandomTickHook::hook();
+        ChunkTickBlocksHook::hook();
         hookInstalled.store(true, std::memory_order_relaxed);
-        logger().info("Hook installed");
+        logger().info("Hook installed on LevelChunk::tickBlocks");
     }
 
     startStatsTask();
@@ -153,7 +157,7 @@ bool PluginImpl::disable() {
     pluginEnabled.store(false, std::memory_order_relaxed);
 
     if (hookInstalled.load(std::memory_order_relaxed)) {
-        BlockRandomTickHook::unhook();
+        ChunkTickBlocksHook::unhook();
         hookInstalled.store(false, std::memory_order_relaxed);
         logger().info("Hook uninstalled");
     }
